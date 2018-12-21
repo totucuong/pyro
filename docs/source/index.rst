@@ -30,8 +30,13 @@ Pyro Documentation
    :caption: Contributed Code:
 
    contrib.autoguide
+   contrib.autoname
+   contrib.bnn
+   contrib.glmm
    contrib.gp
-   contrib.named
+   contrib.minipyro
+   contrib.oed
+   contrib.tracking
 
 
 Indices and tables

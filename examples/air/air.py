@@ -126,7 +126,7 @@ class AIR(nn.Module):
         # Sample presence indicators.
         z_pres = pyro.sample('z_pres_{}'.format(t),
                              dist.Bernoulli(z_pres_prior_p(t) * prev.z_pres)
-                                 .independent(1))
+                                 .to_event(1))
 
         # If zero is sampled for a data point, then no more objects
         # will be added to its output image. We can't
@@ -139,14 +139,14 @@ class AIR(nn.Module):
                               dist.Normal(self.z_where_loc_prior.expand(n, self.z_where_size),
                                           self.z_where_scale_prior.expand(n, self.z_where_size))
                                   .mask(sample_mask)
-                                  .independent(1))
+                                  .to_event(1))
 
         # Sample latent code for contents of the attention window.
         z_what = pyro.sample('z_what_{}'.format(t),
                              dist.Normal(self.prototype.new_zeros([n, self.z_what_size]),
                                          self.prototype.new_ones([n, self.z_what_size]))
                                  .mask(sample_mask)
-                                 .independent(1))
+                                 .to_event(1))
 
         # Map latent code to pixel space.
         y_att = self.decode(z_what)
@@ -161,16 +161,16 @@ class AIR(nn.Module):
 
         return ModelState(x=x, z_pres=z_pres, z_where=z_where)
 
-    def model(self, data, _, **kwargs):
+    def model(self, data, batch_size, **kwargs):
         pyro.module("decode", self.decode)
-        with pyro.iarange('data', data.size(0), use_cuda=self.use_cuda) as ix:
+        with pyro.plate('data', data.size(0), device=data.device) as ix:
             batch = data[ix]
             n = batch.size(0)
             (z_where, z_pres), x = self.prior(n, **kwargs)
             pyro.sample('obs',
                         dist.Normal(x.view(n, -1),
                                     (self.likelihood_sd * self.prototype.new_ones(n, self.x_size ** 2)))
-                            .independent(1),
+                            .to_event(1),
                         obs=batch.view(n, -1))
 
     def guide(self, data, batch_size, **kwargs):
@@ -189,7 +189,7 @@ class AIR(nn.Module):
         pyro.param('bl_h_init', self.bl_h_init)
         pyro.param('bl_c_init', self.bl_c_init)
 
-        with pyro.iarange('data', data.size(0), subsample_size=batch_size, use_cuda=self.use_cuda) as ix:
+        with pyro.plate('data', data.size(0), subsample_size=batch_size, device=data.device) as ix:
             batch = data[ix]
             n = batch.size(0)
 
@@ -228,12 +228,12 @@ class AIR(nn.Module):
         z_pres_p, z_where_loc, z_where_scale = self.predict(h)
 
         # Compute baseline estimates for discrete choice z_pres.
-        bl_value, bl_h, bl_c = self.baseline_step(prev, inputs)
+        infer_dict, bl_h, bl_c = self.baseline_step(prev, inputs)
 
         # Sample presence.
         z_pres = pyro.sample('z_pres_{}'.format(t),
-                             dist.Bernoulli(z_pres_p * prev.z_pres).independent(1),
-                             infer=dict(baseline=dict(baseline_value=bl_value.squeeze(-1))))
+                             dist.Bernoulli(z_pres_p * prev.z_pres).to_event(1),
+                             infer=infer_dict)
 
         sample_mask = z_pres if self.use_masking else torch.tensor(1.0)
 
@@ -241,7 +241,7 @@ class AIR(nn.Module):
                               dist.Normal(z_where_loc + self.z_where_loc_prior,
                                           z_where_scale * self.z_where_scale_prior)
                                   .mask(sample_mask)
-                                  .independent(1))
+                                  .to_event(1))
 
         # Figure 2 of [1] shows x_att depending on z_where and h,
         # rather than z_where and x as here, but I think this is
@@ -254,12 +254,12 @@ class AIR(nn.Module):
         z_what = pyro.sample('z_what_{}'.format(t),
                              dist.Normal(z_what_loc, z_what_scale)
                                  .mask(sample_mask)
-                                 .independent(1))
+                                 .to_event(1))
         return GuideState(h=h, c=c, bl_h=bl_h, bl_c=bl_c, z_pres=z_pres, z_where=z_where, z_what=z_what)
 
     def baseline_step(self, prev, inputs):
         if not self.use_baselines:
-            return None, None, None
+            return dict(), None, None
 
         # Prevent gradients flowing back from baseline loss to
         # inference net by detaching from graph here.
@@ -282,7 +282,8 @@ class AIR(nn.Module):
         if self.baseline_scalar is not None:
             bl_value = bl_value * self.baseline_scalar
 
-        return bl_value, bl_h, bl_c
+        infer_dict = dict(baseline=dict(baseline_value=bl_value.squeeze(-1)))
+        return infer_dict, bl_h, bl_c
 
 
 # Spatial transformer helpers.

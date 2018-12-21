@@ -42,7 +42,7 @@ Many inference algorithms or algorithmic components can be implemented
 in just a few lines of code::
 
     guide_tr = poutine.trace(guide).get_trace(...)
-    model_tr = poutine.trace(poutine.replay(conditioned_model, trace=tr)).get_trace(...)
+    model_tr = poutine.trace(poutine.replay(conditioned_model, trace=guide_tr)).get_trace(...)
     monte_carlo_elbo = model_tr.log_prob_sum() - guide_tr.log_prob_sum()
 """
 
@@ -54,19 +54,21 @@ from six.moves import xrange
 
 from pyro.poutine import util
 
-from .broadcast_messenger import BroadcastMessenger
 from .block_messenger import BlockMessenger
+from .broadcast_messenger import BroadcastMessenger
 from .condition_messenger import ConditionMessenger
 from .enumerate_messenger import EnumerateMessenger
 from .escape_messenger import EscapeMessenger
-from .indep_messenger import IndepMessenger
 from .infer_config_messenger import InferConfigMessenger
 from .lift_messenger import LiftMessenger
+from .markov_messenger import MarkovMessenger
+from .mask_messenger import MaskMessenger
+from .plate_messenger import PlateMessenger  # noqa F403
 from .replay_messenger import ReplayMessenger
 from .runtime import NonlocalExit
 from .scale_messenger import ScaleMessenger
 from .trace_messenger import TraceMessenger
-
+from .uncondition_messenger import UnconditionMessenger
 
 ############################################
 # Begin primitive operations
@@ -166,13 +168,14 @@ def lift(fn=None, prior=None):
     return msngr(fn) if fn is not None else msngr
 
 
-def block(fn=None, hide=None, expose=None, hide_types=None, expose_types=None):
+def block(fn=None, hide_fn=None, expose_fn=None, hide=None, expose=None, hide_types=None, expose_types=None):
     """
     This handler selectively hides Pyro primitive sites from the outside world.
     Default behavior: block everything.
 
     A site is hidden if at least one of the following holds:
 
+        0. ``hide_fn(msg) is True`` or ``(not expose_fn(msg)) is True``
         1. ``msg["name"] in hide``
         2. ``msg["type"] in hide_types``
         3. ``msg["name"] not in expose and msg["type"] not in expose_types``
@@ -199,13 +202,20 @@ def block(fn=None, hide=None, expose=None, hide_types=None, expose_types=None):
         True
 
     :param fn: a stochastic function (callable containing Pyro primitive calls)
+    :param: hide_fn: function that takes a site and returns True to hide the site
+      or False/None to expose it.  If specified, all other parameters are ignored.
+      Only specify one of hide_fn or expose_fn, not both.
+    :param: expose_fn: function that takes a site and returns True to expose the site
+      or False/None to hide it.  If specified, all other parameters are ignored.
+      Only specify one of hide_fn or expose_fn, not both.
     :param hide: list of site names to hide
     :param expose: list of site names to be exposed while all others hidden
     :param hide_types: list of site types to be hidden
     :param expose_types: list of site types to be exposed while all others hidden
     :returns: stochastic function decorated with a :class:`~pyro.poutine.block_messenger.BlockMessenger`
     """
-    msngr = BlockMessenger(hide=hide, expose=expose,
+    msngr = BlockMessenger(hide_fn=hide_fn, expose_fn=expose_fn,
+                           hide=hide, expose=expose,
                            hide_types=hide_types, expose_types=expose_types)
     return msngr(fn) if fn is not None else msngr
 
@@ -213,19 +223,19 @@ def block(fn=None, hide=None, expose=None, hide_types=None, expose_types=None):
 def broadcast(fn=None):
     """
     Automatically broadcasts the batch shape of the stochastic function
-    at a sample site when inside a single or nested iarange context.
+    at a sample site when inside a single or nested plate context.
     The existing `batch_shape` must be broadcastable with the size
-    of the :class:`~pyro.iarange` contexts installed in the
+    of the :class:`~pyro.plate` contexts installed in the
     `cond_indep_stack`.
 
     Notice how `model_automatic_broadcast` below automates expanding of
     distribution batch shapes. This makes it easy to modularize a
     Pyro model as the sub-components are agnostic of the wrapping
-    :class:`~pyro.iarange` contexts.
+    :class:`~pyro.plate` contexts.
 
     >>> def model_broadcast_by_hand():
-    ...     with pyro.iarange("batch", 100, dim=-2):
-    ...         with pyro.iarange("components", 3, dim=-1):
+    ...     with IndepMessenger("batch", 100, dim=-2):
+    ...         with IndepMessenger("components", 3, dim=-1):
     ...             sample = pyro.sample("sample", dist.Bernoulli(torch.ones(3) * 0.5)
     ...                                                .expand_by(100))
     ...             assert sample.shape == torch.Size((100, 3))
@@ -233,8 +243,8 @@ def broadcast(fn=None):
 
     >>> @poutine.broadcast
     ... def model_automatic_broadcast():
-    ...     with pyro.iarange("batch", 100, dim=-2):
-    ...         with pyro.iarange("components", 3, dim=-1):
+    ...     with IndepMessenger("batch", 100, dim=-2):
+    ...         with IndepMessenger("components", 3, dim=-1):
     ...             sample = pyro.sample("sample", dist.Bernoulli(torch.tensor(0.5)))
     ...             assert sample.shape == torch.Size((100, 3))
     ...     return sample
@@ -288,6 +298,19 @@ def condition(fn=None, data=None):
     return msngr(fn) if fn is not None else msngr
 
 
+def uncondition(fn=None):
+    """
+    Given a stochastic funtion with sample statements, conditioned on observed
+    values at some sample statements, removes the conditioning so that all
+    nodes are sampled from.
+
+    :param fn: a stochastic function (callable containing Pyro primitive calls)
+    :returns: a stochastic function decorated with a :class: `~pyro.poutine.uncondition_messenger.UnconditionMessenger`
+    """
+    msngr = UnconditionMessenger()
+    return msngr(fn) if fn is not None else msngr
+
+
 def infer_config(fn=None, config_fn=None):
     """
     Given a callable that contains Pyro primitive calls
@@ -332,16 +355,17 @@ def scale(fn=None, scale=None):
     return msngr(fn) if callable(fn) else msngr
 
 
-def indep(fn=None, name=None, size=None, dim=None):
+def mask(fn=None, mask=None):
     """
-    .. note:: Low-level; use :class:`~pyro.iarange` instead.
+    Given a stochastic function with some batched sample statements and
+    masking tensor, mask out some of the sample statements elementwise.
 
-    This messenger keeps track of stack of independence information declared by
-    nested ``irange`` and ``iarange`` contexts. This information is stored in
-    a ``cond_indep_stack`` at each sample/observe site for consumption by
-    :class:`~pyro.poutine.trace_messenger.TraceMessenger`.
+    :param fn: a stochastic function (callable containing Pyro primitive calls)
+    :param torch.ByteTensor mask: a ``{0,1}``-valued masking tensor
+        (1 includes a site, 0 excludes a site)
+    :returns: stochastic function decorated with a :class:`~pyro.poutine.scale_messenger.MaskMessenger`
     """
-    msngr = IndepMessenger(name=name, size=size, dim=dim)
+    msngr = MaskMessenger(mask=mask)
     return msngr(fn) if fn is not None else msngr
 
 
@@ -353,7 +377,9 @@ def enum(fn=None, first_available_dim=None):
     :param int first_available_dim: The first tensor dimension (counting
         from the right) that is available for parallel enumeration. This
         dimension and all dimensions left may be used internally by Pyro.
+        This should be a negative integer.
     """
+    assert first_available_dim < 0, first_available_dim
     msngr = EnumerateMessenger(first_available_dim=first_available_dim)
     return msngr(fn) if fn is not None else msngr
 
@@ -448,3 +474,30 @@ def queue(fn=None, queue=None, max_tries=None,
         return _fn
 
     return wrapper(fn) if fn is not None else wrapper
+
+
+def markov(fn=None, history=1, keep=False):
+    """
+    Markov dependency declaration.
+
+    This can be used in a variety of ways:
+    - as a context manager
+    - as a decorator for recursive functions
+    - as an iterator for markov chains
+
+    :param int history: The number of previous contexts visible from the
+        current context. Defaults to 1. If zero, this is similar to
+        :class:`pyro.plate`.
+    :param bool keep: If true, frames are replayable. This is important
+        when branching: if ``keep=True``, neighboring branches at the same
+        level can depend on each other; if ``keep=False``, neighboring branches
+        are independent (conditioned on their share"
+    """
+    if fn is None:
+        # Used as a decorator with bound args
+        return MarkovMessenger(history=history, keep=keep)
+    if not callable(fn):
+        # Used as a generator
+        return MarkovMessenger(history=history, keep=keep).generator(iterable=fn)
+    # Used as a decorator with bound args
+    return MarkovMessenger(history=history, keep=keep)(fn)

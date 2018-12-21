@@ -1,8 +1,14 @@
 from __future__ import absolute_import, division, print_function
 
+import os
 import warnings
 
+import torch
+
 import pyro
+
+
+torch.set_default_tensor_type(os.environ.get('PYRO_TENSOR_TYPE', 'torch.DoubleTensor'))
 
 
 def pytest_configure(config):
@@ -16,11 +22,11 @@ def pytest_configure(config):
 
 def pytest_runtest_setup(item):
     pyro.clear_param_store()
-    if item.get_marker("disable_validation"):
+    if item.get_closest_marker("disable_validation"):
         pyro.enable_validation(False)
     else:
         pyro.enable_validation(True)
-    test_initialize_marker = item.get_marker("init")
+    test_initialize_marker = item.get_closest_marker("init")
     if test_initialize_marker:
         rng_seed = test_initialize_marker.kwargs["rng_seed"]
         pyro.set_rng_seed(rng_seed)
@@ -64,7 +70,7 @@ def pytest_collection_modifyitems(config, items):
     selected_items = []
     deselected_items = []
     for item in items:
-        stage_marker = item.get_marker("stage")
+        stage_marker = item.get_closest_marker("stage")
         if not stage_marker:
             selected_items.append(item)
             warnings.warn("No stage associated with the test {}. Will run on each stage invocation.".format(item.name))

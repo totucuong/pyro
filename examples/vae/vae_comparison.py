@@ -12,7 +12,7 @@ from torchvision.utils import save_image
 import pyro
 from pyro.contrib.examples import util
 from pyro.distributions import Bernoulli, Normal
-from pyro.infer import SVI, Trace_ELBO
+from pyro.infer import SVI, JitTrace_ELBO, Trace_ELBO
 from pyro.optim import Adam
 from utils.mnist_cached import DATA_DIR, RESULTS_DIR
 
@@ -50,12 +50,11 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.fc3 = nn.Linear(20, 400)
         self.fc4 = nn.Linear(400, 784)
-        self.sigmoid = nn.Sigmoid()
         self.relu = nn.ReLU()
 
     def forward(self, z):
         h3 = self.relu(self.fc3(z))
-        return self.sigmoid(self.fc4(h3))
+        return torch.sigmoid(self.fc4(h3))
 
 
 @add_metaclass(ABCMeta)
@@ -182,18 +181,18 @@ class PyroVAEImpl(VAE):
     def model(self, data):
         decoder = pyro.module('decoder', self.vae_decoder)
         z_mean, z_std = torch.zeros([data.size(0), 20]), torch.ones([data.size(0), 20])
-        with pyro.iarange('data', data.size(0)):
-            z = pyro.sample('latent', Normal(z_mean, z_std).independent(1))
+        with pyro.plate('data', data.size(0)):
+            z = pyro.sample('latent', Normal(z_mean, z_std).to_event(1))
             img = decoder.forward(z)
             pyro.sample('obs',
-                        Bernoulli(img).independent(1),
+                        Bernoulli(img).to_event(1),
                         obs=data.reshape(-1, 784))
 
     def guide(self, data):
         encoder = pyro.module('encoder', self.vae_encoder)
-        with pyro.iarange('data', data.size(0)):
+        with pyro.plate('data', data.size(0)):
             z_mean, z_var = encoder.forward(data)
-            pyro.sample('latent', Normal(z_mean, z_var.sqrt()).independent(1))
+            pyro.sample('latent', Normal(z_mean, z_var.sqrt()).to_event(1))
 
     def compute_loss_and_gradient(self, x):
         if self.mode == TRAIN:
@@ -205,7 +204,8 @@ class PyroVAEImpl(VAE):
 
     def initialize_optimizer(self, lr):
         optimizer = Adam({'lr': lr})
-        return SVI(self.model, self.guide, optimizer, loss=Trace_ELBO())
+        elbo = JitTrace_ELBO() if self.args.jit else Trace_ELBO()
+        return SVI(self.model, self.guide, optimizer, loss=elbo)
 
 
 def setup(args):
@@ -245,12 +245,14 @@ def main(args):
 
 
 if __name__ == '__main__':
+    assert pyro.__version__.startswith('0.3.0')
     parser = argparse.ArgumentParser(description='VAE using MNIST dataset')
     parser.add_argument('-n', '--num-epochs', nargs='?', default=10, type=int)
     parser.add_argument('--batch_size', nargs='?', default=128, type=int)
     parser.add_argument('--rng_seed', nargs='?', default=0, type=int)
     parser.add_argument('--impl', nargs='?', default='pyro', type=str)
     parser.add_argument('--skip_eval', action='store_true')
+    parser.add_argument('--jit', action='store_true')
     parser.set_defaults(skip_eval=False)
     args = parser.parse_args()
     main(args)

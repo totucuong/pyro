@@ -1,13 +1,15 @@
 from __future__ import absolute_import, division, print_function
 
-from torch.distributions import constraints
+import torch
+import torch.distributions as torchdist
 from torch.nn import Parameter
 
 import pyro
 import pyro.distributions as dist
+from pyro.contrib import autoname
 from pyro.contrib.gp.models.model import GPModel
 from pyro.contrib.gp.util import conditional
-from pyro.params import param_with_module_name
+from pyro.util import warn_if_nan
 
 
 class GPRegression(GPModel):
@@ -61,43 +63,38 @@ class GPRegression(GPModel):
         process. By default, we use zero mean.
     :param float jitter: A small positive term which is added into the diagonal part of
         a covariance matrix to help stablize its Cholesky decomposition.
-    :param str name: Name of this model.
     """
-    def __init__(self, X, y, kernel, noise=None, mean_function=None, jitter=1e-6,
-                 name="GPR"):
-        super(GPRegression, self).__init__(X, y, kernel, mean_function, jitter, name)
+    def __init__(self, X, y, kernel, noise=None, mean_function=None, jitter=1e-6):
+        super(GPRegression, self).__init__(X, y, kernel, mean_function, jitter)
 
-        noise = self.X.new_ones(()) if noise is None else noise
+        noise = self.X.new_tensor(1.) if noise is None else noise
         self.noise = Parameter(noise)
-        self.set_constraint("noise", constraints.greater_than(self.jitter))
+        self.set_constraint("noise", torchdist.constraints.positive)
 
+    @autoname.scope(prefix="GPR")
     def model(self):
         self.set_mode("model")
 
-        noise = self.get_param("noise")
+        N = self.X.size(0)
+        Kff = self.kernel(self.X)
+        Kff.view(-1)[::N + 1] += self.jitter + self.noise  # add noise to diagonal
+        Lff = Kff.cholesky()
 
-        Kff = self.kernel(self.X) + noise.expand(self.X.shape[0]).diag()
-        Lff = Kff.potrf(upper=False)
-
-        zero_loc = self.X.new_zeros(self.X.shape[0])
+        zero_loc = self.X.new_zeros(self.X.size(0))
         f_loc = zero_loc + self.mean_function(self.X)
         if self.y is None:
             f_var = Lff.pow(2).sum(dim=-1)
             return f_loc, f_var
         else:
-            y_name = param_with_module_name(self.name, "y")
-            return pyro.sample(y_name,
+            return pyro.sample("y",
                                dist.MultivariateNormal(f_loc, scale_tril=Lff)
                                    .expand_by(self.y.shape[:-1])
-                                   .independent(self.y.dim() - 1),
+                                   .to_event(self.y.dim() - 1),
                                obs=self.y)
 
+    @autoname.scope(prefix="GPR")
     def guide(self):
         self.set_mode("guide")
-
-        noise = self.get_param("noise")
-
-        return noise
 
     def forward(self, Xnew, full_cov=False, noiseless=True):
         r"""
@@ -120,18 +117,95 @@ class GPRegression(GPModel):
         :rtype: tuple(torch.Tensor, torch.Tensor)
         """
         self._check_Xnew_shape(Xnew)
-        noise = self.guide()
+        self.set_mode("guide")
 
-        Kff = self.kernel(self.X) + noise.expand(self.X.shape[0]).diag()
-        Lff = Kff.potrf(upper=False)
+        N = self.X.size(0)
+        Kff = self.kernel(self.X).contiguous()
+        Kff.view(-1)[::N + 1] += self.jitter + self.noise  # add noise to the diagonal
+        Lff = Kff.cholesky()
 
         y_residual = self.y - self.mean_function(self.X)
         loc, cov = conditional(Xnew, self.X, self.kernel, y_residual, None, Lff,
                                full_cov, jitter=self.jitter)
 
         if full_cov and not noiseless:
-            cov = cov + noise.expand(Xnew.shape[0]).diag()
+            M = Xnew.size(0)
+            cov = cov.contiguous()
+            cov.view(-1, M * M)[:, ::M + 1] += self.noise  # add noise to the diagonal
         if not full_cov and not noiseless:
-            cov = cov + noise.expand(Xnew.shape[0])
+            cov = cov + self.noise
 
         return loc + self.mean_function(Xnew), cov
+
+    def iter_sample(self, noiseless=True):
+        r"""
+        Iteratively constructs a sample from the Gaussian Process posterior.
+
+        Recall that at test input points :math:`X_{new}`, the posterior is
+        multivariate Gaussian distributed with mean and covariance matrix
+        given by :func:`forward`.
+
+        This method samples lazily from this multivariate Gaussian. The advantage
+        of this approach is that later query points can depend upon earlier ones.
+        Particularly useful when the querying is to be done by an optimisation
+        routine.
+
+        .. note:: The noise parameter ``noise`` (:math:`\epsilon`) together with
+            kernel's parameters have been learned from a training procedure (MCMC or
+            SVI).
+
+        :param bool noiseless: A flag to decide if we want to add sampling noise
+            to the samples beyond the noise inherent in the GP posterior.
+        :returns: sampler
+        :rtype: function
+        """
+        noise = self.noise.detach()
+        X = self.X.clone().detach()
+        y = self.y.clone().detach()
+        N = X.size(0)
+        Kff = self.kernel(X).contiguous()
+        Kff.view(-1)[::N + 1] += noise  # add noise to the diagonal
+
+        outside_vars = {"X": X, "y": y, "N": N, "Kff": Kff}
+
+        def sample_next(xnew, outside_vars):
+            """Repeatedly samples from the Gaussian process posterior,
+            conditioning on previously sampled values.
+            """
+            warn_if_nan(xnew)
+
+            # Variables from outer scope
+            X, y, Kff = outside_vars["X"], outside_vars["y"], outside_vars["Kff"]
+
+            # Compute Cholesky decomposition of kernel matrix
+            Lff = Kff.cholesky()
+            y_residual = y - self.mean_function(X)
+
+            # Compute conditional mean and variance
+            loc, cov = conditional(xnew, X, self.kernel, y_residual, None, Lff,
+                                   False, jitter=self.jitter)
+            if not noiseless:
+                cov = cov + noise
+
+            ynew = torchdist.Normal(loc + self.mean_function(xnew), cov.sqrt()).rsample()
+
+            # Update kernel matrix
+            N = outside_vars["N"]
+            Kffnew = Kff.new_empty(N+1, N+1)
+            Kffnew[:N, :N] = Kff
+            cross = self.kernel(X, xnew).squeeze()
+            end = self.kernel(xnew, xnew).squeeze()
+            Kffnew[N, :N] = cross
+            Kffnew[:N, N] = cross
+            # No noise, just jitter for numerical stability
+            Kffnew[N, N] = end + self.jitter
+            # Heuristic to avoid adding degenerate points
+            if Kffnew.logdet() > -15.:
+                outside_vars["Kff"] = Kffnew
+                outside_vars["N"] += 1
+                outside_vars["X"] = torch.cat((X, xnew))
+                outside_vars["y"] = torch.cat((y, ynew))
+
+            return ynew
+
+        return lambda xnew: sample_next(xnew, outside_vars)

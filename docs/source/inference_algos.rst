@@ -33,12 +33,31 @@ ELBO
     :show-inheritance:
     :member-order: bysource
 
+.. automodule:: pyro.infer.trace_mean_field_elbo
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource
+
+.. automodule:: pyro.infer.renyi_elbo
+    :members:
+    :undoc-members:
+    :show-inheritance:
+    :member-order: bysource
+
 Importance
 ----------
 
 .. automodule:: pyro.infer.importance
     :members:
     :undoc-members:
+    :show-inheritance:
+
+Discrete Inference
+------------------
+
+.. automodule:: pyro.infer.discrete
+    :members:
     :show-inheritance:
 
 Inference Utilities

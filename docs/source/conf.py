@@ -49,6 +49,12 @@ extensions = [
     'sphinx.ext.doctest',
 ]
 
+# Disable documentation inheritance so as to avoid inheriting
+# docstrings in a different format, e.g. when the parent class
+# is a PyTorch class.
+
+autodoc_inherit_docstrings = False
+
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
 
@@ -183,6 +189,7 @@ intersphinx_mapping = {
     'python': ('https://docs.python.org/3/', None),
     'torch': ('http://pytorch.org/docs/master/', None),
     'networkx': ('https://networkx.github.io/documentation/stable/', None),
+    'opt_einsum': ('https://optimized-einsum.readthedocs.io/en/stable/', None)
 }
 
 # document class constructors (__init__ methods):
@@ -201,7 +208,8 @@ def setup(app):
 
 # @jpchen's hack to get rtd builder to install latest pytorch
 if 'READTHEDOCS' in os.environ:
-    os.system('curl -o install.sh https://raw.githubusercontent.com/uber/pyro/dev/scripts/install_pytorch.sh')
-    os.system('curl https://raw.githubusercontent.com/uber/pyro/dev/README.md > README.md')
-    os.system('bash install.sh')
-    os.system('rm -f install.sh')
+    os.system('pip install http://download.pytorch.org/whl/cpu/torch-0.4.1-cp27-cp27mu-linux_x86_64.whl')
+    # for pytorch 1.0 (currently fails with OOM
+    # https://readthedocs.org/projects/pyro-ppl/builds/8159615/
+#     os.system('pip install torch_nightly==1.0.0.dev20181127 -f '
+#               'https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html')

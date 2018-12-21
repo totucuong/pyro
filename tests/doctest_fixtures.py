@@ -4,12 +4,16 @@ import torch
 
 import pyro
 import pyro.contrib.gp as gp
-import pyro.contrib.named as named
+import pyro.contrib.autoname.named as named
 import pyro.distributions as dist
 import pyro.poutine as poutine
 from pyro.infer import EmpiricalMarginal
 from pyro.infer.mcmc import HMC, MCMC, NUTS
 from pyro.params import param_with_module_name
+
+
+# Fix seed for all doctest runs.
+pyro.set_rng_seed(0)
 
 
 @pytest.fixture(autouse=True)

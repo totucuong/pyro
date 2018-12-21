@@ -1,5 +1,9 @@
 from __future__ import absolute_import, division, print_function
 
+import sys
+
+import six
+
 from .messenger import Messenger
 from .trace_struct import Trace
 from .util import site_is_subsample
@@ -100,56 +104,12 @@ class TraceMessenger(Messenger):
         self.trace = tr
         super(TraceMessenger, self)._reset()
 
-    def _pyro_sample(self, msg):
-        """
-        :param msg: current message at a trace site.
-        :returns: updated message
+    def _pyro_post_sample(self, msg):
+        if not self.param_only:
+            self.trace.add_node(msg["name"], **msg.copy())
 
-        Implements default pyro.sample Handler behavior with an additional side effect:
-        if the observation at the site is not None,
-        then store the observation in self.trace
-        and return the observation,
-        else call the function,
-        then store the return value in self.trace
-        and return the return value.
-        """
-        name = msg["name"]
-        if name in self.trace:
-            site = self.trace.nodes[name]
-            if site['type'] == 'param':
-                # Cannot sample or observe after a param statement.
-                raise RuntimeError("{} is already in the trace as a param".format(name))
-            elif site['type'] == 'sample':
-                # Cannot sample after a previous sample statement.
-                raise RuntimeError("Multiple pyro.sample sites named '{}'".format(name))
-        return None
-
-    def _pyro_param(self, msg):
-        """
-        :param msg: current message at a trace site.
-        :returns: updated message
-
-        Implements default pyro.param Handler behavior with an additional side effect:
-        queries the parameter store with the site name and varargs
-        and returns the result of the query.
-
-        If the parameter doesn't exist, create it using the site varargs.
-        If it does exist, grab it from the parameter store.
-        Store the parameter in self.trace, and then return the parameter.
-        """
-        if msg["name"] in self.trace:
-            if self.trace.nodes[msg['name']]['type'] == "sample":
-                raise RuntimeError("{} is already in the trace as a sample".format(msg['name']))
-        return None
-
-    def _postprocess_message(self, msg):
-        if msg["type"] == "sample" and self.param_only:
-            return None
-        val = msg["value"]
-        site = msg.copy()
-        site.update(value=val)
-        self.trace.add_node(msg["name"], **site)
-        return None
+    def _pyro_post_param(self, msg):
+        self.trace.add_node(msg["name"], **msg.copy())
 
 
 class TraceHandler(object):
@@ -183,7 +143,14 @@ class TraceHandler(object):
             self.msngr.trace.add_node("_INPUT",
                                       name="_INPUT", type="args",
                                       args=args, kwargs=kwargs)
-            ret = self.fn(*args, **kwargs)
+            try:
+                ret = self.fn(*args, **kwargs)
+            except (ValueError, RuntimeError):
+                exc_type, exc_value, traceback = sys.exc_info()
+                shapes = self.msngr.trace.format_shapes()
+                six.reraise(exc_type,
+                            exc_type(u"{}\n{}".format(exc_value, shapes)),
+                            traceback)
             self.msngr.trace.add_node("_RETURN", name="_RETURN", type="return", value=ret)
         return ret
 

@@ -59,8 +59,12 @@ EXTRAS_REQUIRE = [
     'torchvision',
     'visdom>=0.1.4',
     'pandas',
+    'seaborn',
     'wget',
 ]
+
+if sys.version_info[0] == 2:
+    EXTRAS_REQUIRE.append('functools32')
 
 setup(
     name='pyro-ppl',
@@ -76,16 +80,18 @@ setup(
         # add them to `docs/requirements.txt`
         'contextlib2',
         'graphviz>=0.8',
-        'networkx>=2.0.0',
+        'networkx>=2.2',
         'numpy>=1.7',
+        'opt_einsum>=2.3.0',
         'six>=1.10.0',
-        'torch>=0.4.0',
+        'torch>=1.0.0',
+        'tqdm>=4.28',
     ],
     extras_require={
         'extras': EXTRAS_REQUIRE,
         'test': EXTRAS_REQUIRE + [
             'nbval',
-            'pytest',
+            'pytest==3.7',
             'pytest-cov',
             'scipy>=0.19.0',
         ],
@@ -98,7 +104,7 @@ setup(
             'nbstripout',
             'nbval',
             'pypandoc',
-            'pytest',
+            'pytest==3.7',
             'pytest-xdist',
             'scipy>=0.19.0',
             'sphinx',
@@ -106,7 +112,7 @@ setup(
             'yapf',
         ],
     },
-    tests_require=['flake8', 'pytest'],
+    tests_require=['flake8', 'pytest==3.7'],
     keywords='machine learning statistics probabilistic programming bayesian modeling pytorch',
     license='MIT License',
     classifiers=[
@@ -116,7 +122,7 @@ setup(
         'Operating System :: POSIX :: Linux',
         'Operating System :: MacOS :: MacOS X',
         'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.6',
     ],
     # yapf
 )

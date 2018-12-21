@@ -1,145 +1,14 @@
 from __future__ import absolute_import, division, print_function
 
 import torch
-import torch.nn as nn
 
-import pyro
-import pyro.distributions as dist
-from pyro.distributions.util import matrix_triangular_solve_compat
-from pyro.params import param_with_module_name
-
-
-class Parameterized(nn.Module):
-    """
-    Base class for other modules in Gaussin Process module.
-
-    Parameters of this object can be set priors, set constraints, or fixed to a
-    specific value.
-
-    By default, data of a parameter is a float :class:`torch.Tensor` (unless we use
-    :func:`torch.set_default_tensor_type` to change default tensor type). To cast these
-    parameters to a correct data type or GPU device, we can call methods such as
-    :meth:`~torch.nn.Module.double` or :meth:`~torch.nn.Module.cuda`. See
-    :class:`torch.nn.Module` for more information.
-
-    :param str name: Name of this object.
-    """
-    def __init__(self, name=None):
-        super(Parameterized, self).__init__()
-        self._priors = {}
-        self._constraints = {}
-        self._fixed_params = {}
-        self._registered_params = {}
-
-        self.name = name
-
-    def set_prior(self, param, prior):
-        """
-        Sets a prior to a parameter.
-
-        :param str param: Name of the parameter.
-        :param ~pyro.distributions.distribution.Distribution prior: A Pyro prior
-            distribution.
-        """
-        self._priors[param] = prior
-
-    def set_constraint(self, param, constraint):
-        """
-        Sets a constraint to a parameter.
-
-        :param str param: Name of the parameter.
-        :param ~torch.distributions.constraints.Constraint constraint: A PyTorch
-            constraint. See :mod:`torch.distributions.constraints` for a list of
-            constraints.
-        """
-        self._constraints[param] = constraint
-
-    def fix_param(self, param, value=None):
-        """
-        Fixes a parameter to a specic value. If ``value=None``, fixes the parameter
-        to the default value.
-
-        :param str param: Name of the parameter.
-        :param torch.Tensor value: Fixed value.
-        """
-        if value is None:
-            value = getattr(self, param).detach()
-        self._fixed_params[param] = value
-
-    def set_mode(self, mode, recursive=True):
-        """
-        Sets ``mode`` of this object to be able to use its parameters in stochastic
-        functions. If ``mode="model"``, a parameter with prior will get its value
-        from the primitive :func:`pyro.sample`. If ``mode="guide"`` or there is no
-        prior on a parameter, :func:`pyro.param` will be called.
-
-        This method automatically sets ``mode`` for submodules which belong to
-        :class:`Parameterized` class unless ``recursive=False``.
-
-        :param str mode: Either "model" or "guide".
-        :param bool recursive: A flag to tell if we want to set mode for all
-            submodules.
-        """
-        if mode not in ["model", "guide"]:
-            raise ValueError("Mode should be either 'model' or 'guide', but got {}."
-                             .format(mode))
-        if recursive:
-            for module in self.children():
-                if isinstance(module, Parameterized):
-                    module.set_mode(mode)
-        for param in self._parameters:
-            self._register_param(param, mode)
-
-    def get_param(self, param):
-        """
-        Gets the current value of a parameter. The correct behavior will depend on
-        ``mode`` of this object (see :meth:`set_mode` method).
-
-        :param str param: Name of the parameter.
-        """
-        if param not in self._registered_params:  # set_mode() has not been called yet
-            return getattr(self, param)
-        else:
-            return self._registered_params[param]
-
-    def _register_param(self, param, mode="model"):
-        """
-        Registers a parameter to Pyro. It can be seen as a wrapper for
-        :func:`pyro.param` and :func:`pyro.sample` primitives.
-
-        :param str param: Name of the parameter.
-        :param str mode: Either "model" or "guide".
-        """
-        if param in self._fixed_params:
-            self._registered_params[param] = self._fixed_params[param]
-            return
-        prior = self._priors.get(param)
-        if self.name is None:
-            param_name = param
-        else:
-            param_name = param_with_module_name(self.name, param)
-
-        if prior is None:
-            constraint = self._constraints.get(param)
-            default_value = getattr(self, param)
-            if constraint is None:
-                p = pyro.param(param_name, default_value)
-            else:
-                p = pyro.param(param_name, default_value, constraint=constraint)
-        elif mode == "model":
-            p = pyro.sample(param_name, prior)
-        else:  # prior != None and mode = "guide"
-            MAP_param_name = param_name + "_MAP"
-            # TODO: consider to init parameter from a prior call instead of mean
-            MAP_param = pyro.param(MAP_param_name, prior.mean.detach())
-            p = pyro.sample(param_name, dist.Delta(MAP_param))
-
-        self._registered_params[param] = p
+from pyro.infer import TraceMeanField_ELBO
+from pyro.infer.util import torch_backward, torch_item
 
 
 def conditional(Xnew, X, kernel, f_loc, f_scale_tril=None, Lff=None, full_cov=False,
                 whiten=False, jitter=1e-6):
-    """
+    r"""
     Given :math:`X_{new}`, predicts loc and covariance matrix of the conditional
     multivariate normal distribution
 
@@ -195,24 +64,25 @@ def conditional(Xnew, X, kernel, f_loc, f_scale_tril=None, Lff=None, full_cov=Fa
     # v = inv(Lff) @ f_loc  <- whitened f_loc
     # S = inv(Lff) @ f_scale_tril  <- whitened f_scale_tril
     # Denote:
-    #     W = inv(Lff) @ Kf*
-    #     K = W.T @ S @ S.T @ W
-    #     Q** = K*f @ inv(Kff) @ Kf* = W.T @ W
-    # loc = K*f @ inv(Kff) @ f_loc = W.T @ v
+    #     W = (inv(Lff) @ Kf*).T
+    #     K = W @ S @ S.T @ W.T
+    #     Q** = K*f @ inv(Kff) @ Kf* = W @ W.T
+    # loc = K*f @ inv(Kff) @ f_loc = W @ v
     # Case 1: f_scale_tril = None
     #     cov = K** - K*f @ inv(Kff) @ Kf* = K** - Q**
     # Case 2: f_scale_tril != None
     #     cov = K** - Q** + K*f @ inv(Kff) @ f_cov @ inv(Kff) @ Kf*
-    #         = K** - Q** + W.T @ S @ S.T @ W
+    #         = K** - Q** + W @ S @ S.T @ W.T
     #         = K** - Q** + K
 
-    N = X.shape[0]
-    M = Xnew.shape[0]
+    N = X.size(0)
+    M = Xnew.size(0)
     latent_shape = f_loc.shape[:-1]
 
     if Lff is None:
-        Kff = kernel(X) + torch.eye(N, out=X.new_empty(N, N)) * jitter
-        Lff = Kff.potrf(upper=False)
+        Kff = kernel(X).contiguous()
+        Kff.view(-1)[::N + 1] += jitter  # add jitter to diagonal
+        Lff = Kff.cholesky()
     Kfs = kernel(X, Xnew)
 
     # convert f_loc_shape from latent_shape x N to N x latent_shape
@@ -227,7 +97,7 @@ def conditional(Xnew, X, kernel, f_loc, f_scale_tril=None, Lff=None, full_cov=Fa
 
     if whiten:
         v_2D = f_loc_2D
-        W = matrix_triangular_solve_compat(Kfs, Lff, upper=False)
+        W = Kfs.trtrs(Lff, upper=False)[0].t()
         if f_scale_tril is not None:
             S_2D = f_scale_tril_2D
     else:
@@ -235,37 +105,37 @@ def conditional(Xnew, X, kernel, f_loc, f_scale_tril=None, Lff=None, full_cov=Fa
         if f_scale_tril is not None:
             pack = torch.cat((pack, f_scale_tril_2D), dim=1)
 
-        Lffinv_pack = matrix_triangular_solve_compat(pack, Lff, upper=False)
+        Lffinv_pack = pack.trtrs(Lff, upper=False)[0]
         # unpack
-        v_2D = Lffinv_pack[:, :f_loc_2D.shape[1]]
-        W = Lffinv_pack[:, f_loc_2D.shape[1]:f_loc_2D.shape[1] + M]
+        v_2D = Lffinv_pack[:, :f_loc_2D.size(1)]
+        W = Lffinv_pack[:, f_loc_2D.size(1):f_loc_2D.size(1) + M].t()
         if f_scale_tril is not None:
-            S_2D = Lffinv_pack[:, -f_scale_tril_2D.shape[1]:]
+            S_2D = Lffinv_pack[:, -f_scale_tril_2D.size(1):]
 
     loc_shape = latent_shape + (M,)
-    loc = v_2D.t().matmul(W).reshape(loc_shape)
+    loc = W.matmul(v_2D).t().reshape(loc_shape)
 
     if full_cov:
         Kss = kernel(Xnew)
-        Qss = W.t().matmul(W)
+        Qss = W.matmul(W.t())
         cov = Kss - Qss
     else:
         Kssdiag = kernel(Xnew, diag=True)
-        Qssdiag = W.pow(2).sum(dim=0)
+        Qssdiag = W.pow(2).sum(dim=-1)
         var = Kssdiag - Qssdiag
 
     if f_scale_tril is not None:
-        Wt_S_shape = (Xnew.shape[0],) + f_scale_tril.shape[1:]
-        Wt_S = W.t().matmul(S_2D).reshape(Wt_S_shape)
-        # convert Wt_S_shape from M x N x latent_shape to latent_shape x M x N
-        Wt_S = Wt_S.permute(list(range(2, Wt_S.dim())) + [0, 1])
+        W_S_shape = (Xnew.size(0),) + f_scale_tril.shape[1:]
+        W_S = W.matmul(S_2D).reshape(W_S_shape)
+        # convert W_S_shape from M x N x latent_shape to latent_shape x M x N
+        W_S = W_S.permute(list(range(2, W_S.dim())) + [0, 1])
 
         if full_cov:
-            St_W = Wt_S.transpose(-2, -1)
-            K = Wt_S.matmul(St_W)
+            St_Wt = W_S.transpose(-2, -1)
+            K = W_S.matmul(St_Wt)
             cov = cov + K
         else:
-            Kdiag = Wt_S.pow(2).sum(dim=-1)
+            Kdiag = W_S.pow(2).sum(dim=-1)
             var = var + Kdiag
     else:
         if full_cov:
@@ -274,3 +144,36 @@ def conditional(Xnew, X, kernel, f_loc, f_scale_tril=None, Lff=None, full_cov=Fa
             var = var.expand(latent_shape + (M,))
 
     return (loc, cov) if full_cov else (loc, var)
+
+
+def train(gpmodule, optimizer=None, loss_fn=None, retain_graph=None, num_steps=1000):
+    """
+    A helper to optimize parameters for a GP module.
+
+    :param ~pyro.contrib.gp.models.GPModel gpmodule: A GP module.
+    :param ~torch.optim.Optimizer optimizer: A PyTorch optimizer instance.
+        By default, we use Adam with ``lr=0.01``.
+    :param callable loss_fn: A loss function which takes inputs are
+        ``gpmodule.model``, ``gpmodule.guide``, and returns ELBO loss.
+        By default, ``loss_fn=TraceMeanField_ELBO().differentiable_loss``.
+    :param bool retain_graph: An optional flag of ``torch.autograd.backward``.
+    :param int num_steps: Number of steps to run SVI.
+    :returns: a list of losses during the training procedure
+    :rtype: list
+    """
+    optimizer = (torch.optim.Adam(gpmodule.parameters(), lr=0.01)
+                 if optimizer is None else optimizer)
+    # TODO: add support for JIT loss
+    loss_fn = TraceMeanField_ELBO().differentiable_loss if loss_fn is None else loss_fn
+
+    def closure():
+        optimizer.zero_grad()
+        loss = loss_fn(gpmodule.model, gpmodule.guide)
+        torch_backward(loss, retain_graph)
+        return loss
+
+    losses = []
+    for i in range(num_steps):
+        loss = optimizer.step(closure)
+        losses.append(torch_item(loss))
+    return losses

@@ -6,7 +6,7 @@ from torch.autograd.function import once_differentiable
 from torch.distributions import constraints
 
 from pyro.distributions.torch import MultivariateNormal
-from pyro.distributions.util import sum_leftmost
+from pyro.distributions.util import eye_like, sum_leftmost
 
 
 class OMTMultivariateNormal(MultivariateNormal):
@@ -23,11 +23,11 @@ class OMTMultivariateNormal(MultivariateNormal):
     arg_constraints = {"loc": constraints.real, "scale_tril": constraints.lower_triangular}
 
     def __init__(self, loc, scale_tril):
-        assert(loc.dim() == 1), "OMTMultivariateNormal loc must be 1-dimensional"
-        assert(scale_tril.dim() == 2), "OMTMultivariateNormal scale_tril must be 2-dimensional"
-        covariance_matrix = torch.mm(scale_tril, scale_tril.t())
-        super(OMTMultivariateNormal, self).__init__(loc, covariance_matrix)
-        self.scale_tril = scale_tril
+        if loc.dim() != 1:
+            raise ValueError("OMTMultivariateNormal loc must be 1-dimensional")
+        if scale_tril.dim() != 2:
+            raise ValueError("OMTMultivariateNormal scale_tril must be 2-dimensional")
+        super(OMTMultivariateNormal, self).__init__(loc, scale_tril=scale_tril)
 
     def rsample(self, sample_shape=torch.Size()):
         return _OMTMVNSample.apply(self.loc, self.scale_tril, sample_shape + self.loc.shape)
@@ -51,7 +51,7 @@ class _OMTMVNSample(Function):
         g = grad_output
         loc_grad = sum_leftmost(grad_output, -1)
 
-        identity = torch.eye(dim, out=torch.tensor(g.new_empty(dim, dim)))
+        identity = eye_like(g, dim)
         R_inv = torch.trtrs(identity, L.t(), transpose=False, upper=True)[0]
 
         z_ja = z.unsqueeze(-1)
