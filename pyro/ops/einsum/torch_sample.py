@@ -1,8 +1,9 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import operator
 
-from six.moves import reduce
+from functools import reduce
 
 import pyro.distributions as dist
 import pyro.ops.einsum.torch_log

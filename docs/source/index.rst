@@ -3,7 +3,7 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-:github_url: https://github.com/uber/pyro
+:github_url: https://github.com/pyro-ppl/pyro
 
 Pyro Documentation
 ================================
@@ -29,13 +29,15 @@ Pyro Documentation
    :maxdepth: 2
    :caption: Contributed Code:
 
-   contrib.autoguide
    contrib.autoname
    contrib.bnn
-   contrib.glmm
+   contrib.cevae
+   contrib.easyguide
+   contrib.examples
    contrib.gp
    contrib.minipyro
    contrib.oed
+   contrib.timeseries
    contrib.tracking
 
 

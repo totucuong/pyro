@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 from pyro.contrib.gp.kernels.brownian import Brownian
 from pyro.contrib.gp.kernels.coregionalize import Coregionalize

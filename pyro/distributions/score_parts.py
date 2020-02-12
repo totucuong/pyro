@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 from collections import namedtuple
 
@@ -18,7 +19,7 @@ class ScoreParts(namedtuple('ScoreParts', ['log_prob', 'score_function', 'entrop
         :param scale: a positive scale
         :type scale: torch.Tensor or number
         :param mask: an optional masking tensor
-        :type mask: torch.ByteTensor or None
+        :type mask: torch.BoolTensor or None
         """
         log_prob = scale_and_mask(self.log_prob, scale, mask)
         score_function = self.score_function  # not scaled

@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import pytest
 import torch
@@ -106,7 +107,6 @@ def get_trace(fn, *args, **kwargs):
 @pytest.mark.parametrize('model', EXAMPLE_MODELS, ids=EXAMPLE_MODEL_IDS)
 @pytest.mark.parametrize('poutine_name', [
     'block',
-    'do',
     'replay',
     'trace',
 ])

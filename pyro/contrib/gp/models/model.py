@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 from pyro.contrib.gp.parameterized import Parameterized
 
@@ -37,8 +38,8 @@ class GPModel(Parameterized):
         >>> X = torch.tensor([[1., 5, 3], [4, 3, 7]])
         >>> y = torch.tensor([2., 1])
         >>> kernel = gp.kernels.RBF(input_dim=3)
-        >>> kernel.set_prior("variance", dist.Uniform(torch.tensor(0.5), torch.tensor(1.5)))
-        >>> kernel.set_prior("lengthscale", dist.Uniform(torch.tensor(1.0), torch.tensor(3.0)))
+        >>> kernel.variance = pyro.nn.PyroSample(dist.Uniform(torch.tensor(0.5), torch.tensor(1.5)))
+        >>> kernel.lengthscale = pyro.nn.PyroSample(dist.Uniform(torch.tensor(1.0), torch.tensor(3.0)))
         >>> gpr = gp.models.GPRegression(X, y, kernel)
 
     There are two ways to train a Gaussian Process model:
@@ -47,11 +48,10 @@ class GPModel(Parameterized):
       get posterior samples for the Gaussian Process's parameters. For example:
 
         >>> hmc_kernel = HMC(gpr.model)
-        >>> mcmc_run = MCMC(hmc_kernel, num_samples=10)
-        >>> posterior_ls_trace = []  # store lengthscale trace
-        >>> ls_name = "GPR/RBF/lengthscale"
-        >>> for trace, _ in mcmc_run._traces():
-        ...     posterior_ls_trace.append(trace.nodes[ls_name]["value"])
+        >>> mcmc = MCMC(hmc_kernel, num_samples=10)
+        >>> mcmc.run()
+        >>> ls_name = "kernel.lengthscale"
+        >>> posterior_ls = mcmc.get_samples()[ls_name]
 
     + Using a variational inference on the pair :meth:`model`, :meth:`guide`:
 
@@ -142,8 +142,8 @@ class GPModel(Parameterized):
             >>> X = torch.tensor([[1., 5, 3], [4, 3, 7]])
             >>> y = torch.tensor([2., 1])
             >>> kernel = gp.kernels.RBF(input_dim=3)
-            >>> kernel.set_prior("variance", dist.Uniform(torch.tensor(0.5), torch.tensor(1.5)))
-            >>> kernel.set_prior("lengthscale", dist.Uniform(torch.tensor(1.0), torch.tensor(3.0)))
+            >>> kernel.variance = pyro.nn.PyroSample(dist.Uniform(torch.tensor(0.5), torch.tensor(1.5)))
+            >>> kernel.lengthscale = pyro.nn.PyroSample(dist.Uniform(torch.tensor(1.0), torch.tensor(3.0)))
 
         + Batch training on a sparse variational model:
 

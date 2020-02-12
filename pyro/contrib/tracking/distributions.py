@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import torch
 from torch.distributions import constraints
@@ -75,7 +76,7 @@ class EKFDistribution(TorchDistribution):
         state = EKFState(self.dynamic_model, self.x0, self.P0, time=0.)
         result = 0.
         assert value.shape == self.event_shape
-        zero = value.new_zeros(self.event_shape[-1])
+        zero = torch.zeros(self.event_shape[-1], dtype=value.dtype, device=value.device)
         for i, measurement_mean in enumerate(value):
             if i:
                 state = state.predict(self.dt)

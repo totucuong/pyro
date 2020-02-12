@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import argparse
 
@@ -71,7 +72,7 @@ def guide_recurse(data, latent):
 
 def main(args):
     pyro.set_rng_seed(0)
-    pyro.enable_validation()
+    pyro.enable_validation(__debug__)
 
     optim = Adam({"lr": 0.1})
     inference = SVI(model, guide, optim, loss=Trace_ELBO())
@@ -104,7 +105,7 @@ def main(args):
 
 
 if __name__ == '__main__':
-    assert pyro.__version__.startswith('0.3.0')
+    assert pyro.__version__.startswith('1.2.0')
     parser = argparse.ArgumentParser(description="parse args")
     parser.add_argument('-n', '--num-epochs', default=100, type=int)
     args = parser.parse_args()

@@ -1,7 +1,9 @@
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+import queue
 from pyro.infer.abstract_infer import TracePosterior
 import pyro.poutine as poutine
-
-from six.moves import queue
 
 ###################################
 # Search borrowed from RSA example

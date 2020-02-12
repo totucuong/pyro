@@ -1,14 +1,12 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 from abc import ABCMeta, abstractmethod
-
-from six import add_metaclass
 
 from pyro.distributions.score_parts import ScoreParts
 
 
-@add_metaclass(ABCMeta)
-class Distribution(object):
+class Distribution(object, metaclass=ABCMeta):
     """
     Base class for parameterized probability distributions.
 

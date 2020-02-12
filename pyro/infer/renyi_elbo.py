@@ -1,11 +1,12 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import math
 import warnings
 
 import torch
 
-from pyro.distributions.util import is_identically_zero, logsumexp
+from pyro.distributions.util import is_identically_zero
 from pyro.infer.elbo import ELBO
 from pyro.infer.enum import get_importance_trace
 from pyro.infer.util import is_validation_enabled, torch_item
@@ -27,8 +28,6 @@ class RenyiELBO(ELBO):
         For :math:`\alpha = 1`, it is better to use
         :class:`~pyro.infer.trace_elbo.Trace_ELBO` class because it helps reduce
         variances of gradient estimations.
-
-    .. warning:: Mini-batch training is not supported yet.
 
     :param float alpha: The order of :math:`\alpha`-divergence. Here
         :math:`\alpha \neq 1`. Default is 0.
@@ -71,13 +70,13 @@ class RenyiELBO(ELBO):
                                         vectorize_particles=vectorize_particles,
                                         strict_enumeration_warning=strict_enumeration_warning)
 
-    def _get_trace(self, model, guide, *args, **kwargs):
+    def _get_trace(self, model, guide, args, kwargs):
         """
         Returns a single trace from the guide, and the model that is run
         against it.
         """
         model_trace, guide_trace = get_importance_trace(
-            "flat", self.max_plate_nesting, model, guide, *args, **kwargs)
+            "flat", self.max_plate_nesting, model, guide, args, kwargs)
         if is_validation_enabled():
             check_if_enumerated(guide_trace)
         return model_trace, guide_trace
@@ -93,7 +92,7 @@ class RenyiELBO(ELBO):
         is_vectorized = self.vectorize_particles and self.num_particles > 1
 
         # grab a vectorized trace from the generator
-        for model_trace, guide_trace in self._get_traces(model, guide, *args, **kwargs):
+        for model_trace, guide_trace in self._get_traces(model, guide, args, kwargs):
             elbo_particle = 0.
 
             # compute elbo
@@ -124,7 +123,7 @@ class RenyiELBO(ELBO):
             elbo_particles = torch.tensor(elbo_particles)  # no need to use .new*() here
 
         log_weights = (1. - self.alpha) * elbo_particles
-        log_mean_weight = logsumexp(log_weights, dim=0) - math.log(self.num_particles)
+        log_mean_weight = torch.logsumexp(log_weights, dim=0) - math.log(self.num_particles)
         elbo = log_mean_weight.sum().item() / (1. - self.alpha)
 
         loss = -elbo
@@ -145,7 +144,7 @@ class RenyiELBO(ELBO):
         tensor_holder = None
 
         # grab a vectorized trace from the generator
-        for model_trace, guide_trace in self._get_traces(model, guide, *args, **kwargs):
+        for model_trace, guide_trace in self._get_traces(model, guide, args, kwargs):
             elbo_particle = 0
             surrogate_elbo_particle = 0
 
@@ -173,7 +172,7 @@ class RenyiELBO(ELBO):
                         surrogate_elbo_particle = surrogate_elbo_particle - log_prob_sum
 
                         if not is_identically_zero(score_function_term):
-                            # link to the issue: https://github.com/uber/pyro/issues/1222
+                            # link to the issue: https://github.com/pyro-ppl/pyro/issues/1222
                             raise NotImplementedError
 
                     if not is_identically_zero(score_function_term):
@@ -182,15 +181,15 @@ class RenyiELBO(ELBO):
 
             if is_identically_zero(elbo_particle):
                 if tensor_holder is not None:
-                    elbo_particle = tensor_holder.new_zeros(tensor_holder.shape)
-                    surrogate_elbo_particle = tensor_holder.new_zeros(tensor_holder.shape)
+                    elbo_particle = torch.zeros_like(tensor_holder)
+                    surrogate_elbo_particle = torch.zeros_like(tensor_holder)
             else:  # elbo_particle is not None
                 if tensor_holder is None:
-                    tensor_holder = elbo_particle.new_empty(elbo_particle.shape)
+                    tensor_holder = torch.zeros_like(elbo_particle)
                     # change types of previous `elbo_particle`s
                     for i in range(len(elbo_particles)):
-                        elbo_particles[i] = tensor_holder.new_zeros(tensor_holder.shape)
-                        surrogate_elbo_particles[i] = tensor_holder.new_zeros(tensor_holder.shape)
+                        elbo_particles[i] = torch.zeros_like(tensor_holder)
+                        surrogate_elbo_particles[i] = torch.zeros_like(tensor_holder)
 
             elbo_particles.append(elbo_particle)
             surrogate_elbo_particles.append(surrogate_elbo_particle)
@@ -206,7 +205,7 @@ class RenyiELBO(ELBO):
             surrogate_elbo_particles = torch.stack(surrogate_elbo_particles)
 
         log_weights = (1. - self.alpha) * elbo_particles
-        log_mean_weight = logsumexp(log_weights, dim=0) - math.log(self.num_particles)
+        log_mean_weight = torch.logsumexp(log_weights, dim=0) - math.log(self.num_particles)
         elbo = log_mean_weight.sum().item() / (1. - self.alpha)
 
         # collect parameters to train from model and guide

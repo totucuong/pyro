@@ -1,10 +1,11 @@
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Inference algorithms and utilities used in the RSA example models.
 
 Adapted from: http://dippl.org/chapters/03-enumeration.html
 """
-
-from __future__ import absolute_import, division, print_function
 
 import torch
 
@@ -16,13 +17,9 @@ from pyro.distributions.util import logsumexp
 from pyro.infer.abstract_infer import TracePosterior
 from pyro.poutine.runtime import NonlocalExit
 
-import six
-from six.moves import queue
+import queue
 import collections
-if six.PY3:
-    import functools
-else:
-    import functools32 as functools
+import functools
 
 
 def memoize(fn=None, **kwargs):

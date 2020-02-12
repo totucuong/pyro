@@ -1,8 +1,9 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import operator
 
-from six.moves import reduce
+from functools import reduce
 
 from pyro.ops import packed
 from pyro.ops.einsum.adjoint import Backward, einsum_backward_sample, transpose, unflatten

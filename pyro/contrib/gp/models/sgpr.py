@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import torch
 from torch.distributions import constraints
@@ -6,8 +7,8 @@ from torch.nn import Parameter
 
 import pyro
 import pyro.distributions as dist
-from pyro.contrib import autoname
 from pyro.contrib.gp.models.model import GPModel
+from pyro.nn.module import PyroParam, pyro_method
 
 
 class SparseGPRegression(GPModel):
@@ -99,8 +100,7 @@ class SparseGPRegression(GPModel):
         self.Xu = Parameter(Xu)
 
         noise = self.X.new_tensor(1.) if noise is None else noise
-        self.noise = Parameter(noise)
-        self.set_constraint("noise", constraints.positive)
+        self.noise = PyroParam(noise, constraints.positive)
 
         if approx is None:
             self.approx = "VFE"
@@ -110,7 +110,7 @@ class SparseGPRegression(GPModel):
             raise ValueError("The sparse approximation method should be one of "
                              "'DTC', 'FITC', 'VFE'.")
 
-    @autoname.scope(prefix="SGPR")
+    @pyro_method
     def model(self):
         self.set_mode("model")
 
@@ -129,7 +129,7 @@ class SparseGPRegression(GPModel):
         Kuu.view(-1)[::M + 1] += self.jitter  # add jitter to the diagonal
         Luu = Kuu.cholesky()
         Kuf = self.kernel(self.Xu, self.X)
-        W = Kuf.trtrs(Luu, upper=False)[0].t()
+        W = Kuf.triangular_solve(Luu, upper=False)[0].t()
 
         D = self.noise.expand(N)
         if self.approx == "FITC" or self.approx == "VFE":
@@ -148,18 +148,18 @@ class SparseGPRegression(GPModel):
             return f_loc, f_var
         else:
             if self.approx == "VFE":
-                pyro.sample("trace_term", dist.Bernoulli(probs=torch.exp(-trace_term / 2.)),
-                            obs=trace_term.new_tensor(1.))
+                pyro.factor(self._pyro_get_fullname("trace_term"), -trace_term / 2.)
 
-            return pyro.sample("y",
+            return pyro.sample(self._pyro_get_fullname("y"),
                                dist.LowRankMultivariateNormal(f_loc, W, D)
                                    .expand_by(self.y.shape[:-1])
                                    .to_event(self.y.dim() - 1),
                                obs=self.y)
 
-    @autoname.scope(prefix="SGPR")
+    @pyro_method
     def guide(self):
         self.set_mode("guide")
+        self._load_pyro_samples()
 
     def forward(self, Xnew, full_cov=False, noiseless=True):
         r"""
@@ -208,7 +208,7 @@ class SparseGPRegression(GPModel):
 
         Kuf = self.kernel(self.Xu, self.X)
 
-        W = Kuf.trtrs(Luu, upper=False)[0]
+        W = Kuf.triangular_solve(Luu, upper=False)[0]
         D = self.noise.expand(N)
         if self.approx == "FITC":
             Kffdiag = self.kernel(self.X, diag=True)
@@ -228,9 +228,9 @@ class SparseGPRegression(GPModel):
         # End caching ----------
 
         Kus = self.kernel(self.Xu, Xnew)
-        Ws = Kus.trtrs(Luu, upper=False)[0]
+        Ws = Kus.triangular_solve(Luu, upper=False)[0]
         pack = torch.cat((W_Dinv_y, Ws), dim=1)
-        Linv_pack = pack.trtrs(L, upper=False)[0]
+        Linv_pack = pack.triangular_solve(L, upper=False)[0]
         # unpack
         Linv_W_Dinv_y = Linv_pack[:, :W_Dinv_y.shape[1]]
         Linv_Ws = Linv_pack[:, W_Dinv_y.shape[1]:]
@@ -245,14 +245,15 @@ class SparseGPRegression(GPModel):
                 Kss.view(-1)[::C + 1] += self.noise  # add noise to the diagonal
             Qss = Ws.t().matmul(Ws)
             cov = Kss - Qss + Linv_Ws.t().matmul(Linv_Ws)
+            cov_shape = self.y.shape[:-1] + (C, C)
+            cov = cov.expand(cov_shape)
         else:
             Kssdiag = self.kernel(Xnew, diag=True)
             if not noiseless:
                 Kssdiag = Kssdiag + self.noise
             Qssdiag = Ws.pow(2).sum(dim=0)
             cov = Kssdiag - Qssdiag + Linv_Ws.pow(2).sum(dim=0)
-
-        cov_shape = self.y.shape[:-1] + (C, C)
-        cov = cov.expand(cov_shape)
+            cov_shape = self.y.shape[:-1] + (C,)
+            cov = cov.expand(cov_shape)
 
         return loc + self.mean_function(Xnew), cov

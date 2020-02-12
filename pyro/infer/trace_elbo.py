@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import weakref
 
@@ -43,13 +44,13 @@ class Trace_ELBO(ELBO):
         Rajesh Ranganath, Sean Gerrish, David M. Blei
     """
 
-    def _get_trace(self, model, guide, *args, **kwargs):
+    def _get_trace(self, model, guide, args, kwargs):
         """
         Returns a single trace from the guide, and the model that is run
         against it.
         """
         model_trace, guide_trace = get_importance_trace(
-            "flat", self.max_plate_nesting, model, guide, *args, **kwargs)
+            "flat", self.max_plate_nesting, model, guide, args, kwargs)
         if is_validation_enabled():
             check_if_enumerated(guide_trace)
         return model_trace, guide_trace
@@ -62,7 +63,7 @@ class Trace_ELBO(ELBO):
         Evaluates the ELBO with an estimator that uses num_particles many samples/particles.
         """
         elbo = 0.0
-        for model_trace, guide_trace in self._get_traces(model, guide, *args, **kwargs):
+        for model_trace, guide_trace in self._get_traces(model, guide, args, kwargs):
             elbo_particle = torch_item(model_trace.log_prob_sum()) - torch_item(guide_trace.log_prob_sum())
             elbo += elbo_particle / self.num_particles
 
@@ -105,12 +106,12 @@ class Trace_ELBO(ELBO):
         """
         loss = 0.
         surrogate_loss = 0.
-        for model_trace, guide_trace in self._get_traces(model, guide, *args, **kwargs):
+        for model_trace, guide_trace in self._get_traces(model, guide, args, kwargs):
             loss_particle, surrogate_loss_particle = self._differentiable_loss_particle(model_trace, guide_trace)
             surrogate_loss += surrogate_loss_particle / self.num_particles
             loss += loss_particle / self.num_particles
         warn_if_nan(surrogate_loss, "loss")
-        return loss + (surrogate_loss - surrogate_loss.detach())
+        return loss + (surrogate_loss - torch_item(surrogate_loss))
 
     def loss_and_grads(self, model, guide, *args, **kwargs):
         """
@@ -122,7 +123,7 @@ class Trace_ELBO(ELBO):
         """
         loss = 0.0
         # grab a trace from the generator
-        for model_trace, guide_trace in self._get_traces(model, guide, *args, **kwargs):
+        for model_trace, guide_trace in self._get_traces(model, guide, args, kwargs):
             loss_particle, surrogate_loss_particle = self._differentiable_loss_particle(model_trace, guide_trace)
             loss += loss_particle / self.num_particles
 
@@ -134,7 +135,6 @@ class Trace_ELBO(ELBO):
             if trainable_params and getattr(surrogate_loss_particle, 'requires_grad', False):
                 surrogate_loss_particle = surrogate_loss_particle / self.num_particles
                 surrogate_loss_particle.backward(retain_graph=self.retain_graph)
-
         warn_if_nan(loss, "loss")
         return loss
 
@@ -160,14 +160,15 @@ class JitTrace_ELBO(Trace_ELBO):
             # build a closure for loss_and_surrogate_loss
             weakself = weakref.ref(self)
 
-            @pyro.ops.jit.trace(ignore_warnings=self.ignore_jit_warnings)
+            @pyro.ops.jit.trace(ignore_warnings=self.ignore_jit_warnings,
+                                jit_options=self.jit_options)
             def loss_and_surrogate_loss(*args, **kwargs):
                 kwargs.pop('_pyro_model_id')
                 kwargs.pop('_pyro_guide_id')
                 self = weakself()
                 loss = 0.0
                 surrogate_loss = 0.0
-                for model_trace, guide_trace in self._get_traces(model, guide, *args, **kwargs):
+                for model_trace, guide_trace in self._get_traces(model, guide, args, kwargs):
                     elbo_particle = 0
                     surrogate_elbo_particle = 0
                     log_r = None

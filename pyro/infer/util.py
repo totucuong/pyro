@@ -1,8 +1,10 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import math
 import numbers
 from collections import Counter, defaultdict
+from contextlib import contextmanager
 
 import torch
 from opt_einsum import shared_intermediates
@@ -27,6 +29,16 @@ def is_validation_enabled():
     return _VALIDATION_ENABLED
 
 
+@contextmanager
+def validation_enabled(is_validate=True):
+    old = is_validation_enabled()
+    try:
+        enable_validation(is_validate)
+        yield
+    finally:
+        enable_validation(old)
+
+
 def torch_item(x):
     """
     Like ``x.item()`` for a :class:`~torch.Tensor`, but also works with numbers.
@@ -37,9 +49,9 @@ def torch_item(x):
 def torch_backward(x, retain_graph=None):
     """
     Like ``x.backward()`` for a :class:`~torch.Tensor`, but also accepts
-    numbers (a no-op if given a number).
+    numbers and tensors without grad_fn (resulting in a no-op)
     """
-    if torch.is_tensor(x):
+    if torch.is_tensor(x) and x.grad_fn:
         x.backward(retain_graph=retain_graph)
 
 
@@ -67,7 +79,7 @@ def zero_grads(tensors):
     """
     for p in tensors:
         if p.grad is not None:
-            p.grad = p.grad.new_zeros(p.shape)
+            p.grad = torch.zeros_like(p.grad)
 
 
 def get_plate_stacks(trace):
@@ -122,13 +134,38 @@ class MultiFrameTensor(dict):
                 if f not in target_frames and value.shape[f.dim] != 1:
                     value = value.sum(f.dim, True)
             while value.shape and value.shape[0] == 1:
-                value.squeeze_(0)
+                value = value.squeeze(0)
             total = value if total is None else total + value
         return total
 
     def __repr__(self):
         return '%s(%s)' % (type(self).__name__, ",\n\t".join([
             '({}, ...)'.format(frames) for frames in self]))
+
+
+def compute_site_dice_factor(site):
+    log_denom = 0
+    log_prob = site["packed"]["score_parts"].score_function  # not scaled by subsampling
+    dims = getattr(log_prob, "_pyro_dims", "")
+    if site["infer"].get("enumerate"):
+        num_samples = site["infer"].get("num_samples")
+        if num_samples is not None:  # site was multiply sampled
+            if not is_identically_zero(log_prob):
+                log_prob = log_prob - log_prob.detach()
+            log_prob = log_prob - math.log(num_samples)
+            if not isinstance(log_prob, torch.Tensor):
+                log_prob = torch.tensor(float(log_prob), device=site["value"].device)
+            log_prob._pyro_dims = dims
+            # I don't know why the following broadcast is needed, but it makes tests pass:
+            log_prob, _ = packed.broadcast_all(log_prob, site["packed"]["log_prob"])
+        elif site["infer"]["enumerate"] == "sequential":
+            log_denom = math.log(site["infer"].get("_enum_total", num_samples))
+    else:  # site was monte carlo sampled
+        if not is_identically_zero(log_prob):
+            log_prob = log_prob - log_prob.detach()
+            log_prob._pyro_dims = dims
+
+    return log_prob, log_denom
 
 
 class Dice(object):
@@ -160,37 +197,21 @@ class Dice(object):
         hashable; the canonical ordinal is a ``frozenset`` of site names.
     """
     def __init__(self, guide_trace, ordering):
-        log_denom = defaultdict(float)  # avoids double-counting when sequentially enumerating
+        log_denoms = defaultdict(float)  # avoids double-counting when sequentially enumerating
         log_probs = defaultdict(list)  # accounts for upstream probabilties
 
         for name, site in guide_trace.nodes.items():
             if site["type"] != "sample":
                 continue
 
-            log_prob = site["packed"]["score_parts"].score_function  # not scaled by subsampling
-            dims = getattr(log_prob, "_pyro_dims", "")
             ordinal = ordering[name]
-            if site["infer"].get("enumerate"):
-                num_samples = site["infer"].get("num_samples")
-                if num_samples is not None:  # site was multiply sampled
-                    if not is_identically_zero(log_prob):
-                        log_prob = log_prob - log_prob.detach()
-                    log_prob = log_prob - math.log(num_samples)
-                    if not isinstance(log_prob, torch.Tensor):
-                        log_prob = site["value"].new_tensor(log_prob)
-                    log_prob._pyro_dims = dims
-                    # I don't know why the following broadcast is needed, but it makes tests pass:
-                    log_prob, _ = packed.broadcast_all(log_prob, site["packed"]["log_prob"])
-                elif site["infer"]["enumerate"] == "sequential":
-                    log_denom[ordinal] += math.log(site["infer"]["_enum_total"])
-            else:  # site was monte carlo sampled
-                if is_identically_zero(log_prob):
-                    continue
-                log_prob = log_prob - log_prob.detach()
-                log_prob._pyro_dims = dims
-            log_probs[ordinal].append(log_prob)
+            log_prob, log_denom = compute_site_dice_factor(site)
+            if not is_identically_zero(log_prob):
+                log_probs[ordinal].append(log_prob)
+            if not is_identically_zero(log_denom):
+                log_denoms[ordinal] += log_denom
 
-        self.log_denom = log_denom
+        self.log_denom = log_denoms
         self.log_probs = log_probs
 
     def _get_log_factors(self, target_ordinal):
@@ -236,7 +257,7 @@ class Dice(object):
                 for cost in cost_terms:
                     key = frozenset(cost._pyro_dims)
                     if queries[key] is None:
-                        query = cost.new_zeros(cost.shape)
+                        query = torch.zeros_like(cost)
                         query._pyro_dims = cost._pyro_dims
                         log_factors.append(query)
                         queries[key] = query
@@ -267,3 +288,11 @@ class Dice(object):
 
         LAST_CACHE_SIZE[0] = count_cached_ops(cache)
         return expected_cost
+
+
+def check_fully_reparametrized(guide_site):
+    log_prob, score_function_term, entropy_term = guide_site["score_parts"]
+    fully_rep = (guide_site["fn"].has_rsample and not is_identically_zero(entropy_term) and
+                 is_identically_zero(score_function_term))
+    if not fully_rep:
+        raise NotImplementedError("All distributions in the guide must be fully reparameterized.")

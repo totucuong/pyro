@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 from unittest import TestCase
 
@@ -78,13 +79,14 @@ class OptimTests(TestCase):
 
 
 @pytest.mark.parametrize('scheduler', [optim.LambdaLR({'optimizer': torch.optim.SGD, 'optim_args': {'lr': 0.01},
-                                                       'lr_lambda': lambda epoch: 2. * epoch}),
+                                                       'lr_lambda': lambda epoch: 2. ** epoch}),
                                        optim.StepLR({'optimizer': torch.optim.SGD, 'optim_args': {'lr': 0.01},
                                                      'gamma': 2, 'step_size': 1}),
                                        optim.ExponentialLR({'optimizer': torch.optim.SGD, 'optim_args': {'lr': 0.01},
-                                                            'gamma': 2})])
-@pytest.mark.parametrize('num_steps', [1, 2])
-def test_dynamic_lr(scheduler, num_steps):
+                                                            'gamma': 2}),
+                                       optim.ReduceLROnPlateau({'optimizer': torch.optim.SGD, 'optim_args': {'lr': 1.0},
+                                                                'factor': 0.1, 'patience': 1})])
+def test_dynamic_lr(scheduler):
     pyro.clear_param_store()
 
     def model():
@@ -97,27 +99,59 @@ def test_dynamic_lr(scheduler, num_steps):
         pyro.sample('latent', Normal(loc, scale))
 
     svi = SVI(model, guide, scheduler, loss=TraceGraph_ELBO())
-    for epoch in range(2):
-        scheduler.set_epoch(epoch)
-        for _ in range(num_steps):
-            svi.step()
-        if epoch == 1:
-            loc = pyro.param('loc').unconstrained()
-            scale = pyro.param('scale').unconstrained()
-            opt = scheduler.optim_objs[loc].optimizer
-            assert opt.state_dict()['param_groups'][0]['lr'] == 0.02
-            assert opt.state_dict()['param_groups'][0]['initial_lr'] == 0.01
-            opt = scheduler.optim_objs[scale].optimizer
-            assert opt.state_dict()['param_groups'][0]['lr'] == 0.02
-            assert opt.state_dict()['param_groups'][0]['initial_lr'] == 0.01
+    for epoch in range(4):
+        svi.step()
+        svi.step()
+        loc = pyro.param('loc').unconstrained()
+        opt_loc = scheduler.optim_objs[loc].optimizer
+        opt_scale = scheduler.optim_objs[loc].optimizer
+        if issubclass(scheduler.pt_scheduler_constructor, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(1.)
+            if epoch == 2:
+                assert opt_loc.state_dict()['param_groups'][0]['lr'] == 0.1
+                assert opt_scale.state_dict()['param_groups'][0]['lr'] == 0.1
+            if epoch == 4:
+                assert opt_loc.state_dict()['param_groups'][0]['lr'] == 0.01
+                assert opt_scale.state_dict()['param_groups'][0]['lr'] == 0.01
+            continue
+        assert opt_loc.state_dict()['param_groups'][0]['initial_lr'] == 0.01
+        assert opt_scale.state_dict()['param_groups'][0]['initial_lr'] == 0.01
+        if epoch == 0:
+            scheduler.step()
+            assert opt_loc.state_dict()['param_groups'][0]['lr'] == 0.02
+            assert opt_scale.state_dict()['param_groups'][0]['lr'] == 0.02
             assert abs(pyro.param('loc').item()) > 1e-5
             assert abs(pyro.param('scale').item() - 0.5) > 1e-5
+        if epoch == 2:
+            scheduler.step(epoch=epoch)
+            assert opt_loc.state_dict()['param_groups'][0]['lr'] == 0.04
+            assert opt_scale.state_dict()['param_groups'][0]['lr'] == 0.04
 
 
 @pytest.mark.parametrize('factory', [optim.Adam, optim.ClippedAdam, optim.RMSprop, optim.SGD])
 def test_autowrap(factory):
     instance = factory({})
     assert instance.pt_optim_constructor.__name__ == factory.__name__
+
+
+@pytest.mark.parametrize('pyro_optim', [optim.Adam, optim.SGD])
+@pytest.mark.parametrize('clip', ['clip_norm', 'clip_value'])
+@pytest.mark.parametrize('value', [1., 3., 5.])
+def test_clip_norm(pyro_optim, clip, value):
+    x1 = torch.tensor(0., requires_grad=True)
+    x2 = torch.tensor(0., requires_grad=True)
+    opt_c = pyro_optim({"lr": 1.}, {clip: value})
+    opt = pyro_optim({"lr": 1.})
+    for step in range(3):
+        x1.backward(Uniform(value, value + 3.).sample())
+        x2.backward(torch.tensor(value))
+        opt_c([x1])
+        opt([x2])
+        assert_equal(x1.grad, torch.tensor(value))
+        assert_equal(x2.grad, torch.tensor(value))
+        assert_equal(x1, x2)
+        opt_c.optim_objs[x1].zero_grad()
+        opt.optim_objs[x2].zero_grad()
 
 
 @pytest.mark.parametrize('clip_norm', [1., 3., 5.])

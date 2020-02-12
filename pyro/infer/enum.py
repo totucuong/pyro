@@ -1,12 +1,14 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import numbers
-
-from six.moves.queue import LifoQueue
+from functools import partial
+from queue import LifoQueue
 
 from pyro import poutine
 from pyro.infer.util import is_validation_enabled
 from pyro.poutine import Trace
+from pyro.poutine.enum_messenger import enumerate_site
 from pyro.poutine.util import prune_subsample_sites
 from pyro.util import check_model_guide_match, check_site_shape, ignore_jit_warnings
 
@@ -19,7 +21,7 @@ def iter_discrete_escape(trace, msg):
 
 
 def iter_discrete_extend(trace, site, **ignored):
-    values = site["fn"].enumerate_support(expand=site["infer"].get("expand", False))
+    values = enumerate_site(site)
     enum_total = values.shape[0]
     with ignore_jit_warnings(["Converting a tensor to a Python index",
                               ("Iterating over a tensor", RuntimeWarning)]):
@@ -34,12 +36,14 @@ def iter_discrete_extend(trace, site, **ignored):
         yield extended_trace
 
 
-def get_importance_trace(graph_type, max_plate_nesting, model, guide, *args, **kwargs):
+def get_importance_trace(graph_type, max_plate_nesting, model, guide, args, kwargs, detach=False):
     """
-    Returns a single trace from the guide, and the model that is run
-    against it.
+    Returns a single trace from the guide, which can optionally be detached,
+    and the model that is run against it.
     """
     guide_trace = poutine.trace(guide, graph_type=graph_type).get_trace(*args, **kwargs)
+    if detach:
+        guide_trace.detach_()
     model_trace = poutine.trace(poutine.replay(model, trace=guide_trace),
                                 graph_type=graph_type).get_trace(*args, **kwargs)
     if is_validation_enabled():
@@ -84,25 +88,27 @@ def iter_discrete_traces(graph_type, fn, *args, **kwargs):
         yield traced_fn.get_trace(*args, **kwargs)
 
 
-def _config_enumerate(default, expand, num_samples):
-
-    def config_fn(site):
-        if site["type"] != "sample" or site["is_observed"]:
-            return {}
-        if type(site["fn"]).__name__ == "_Subsample":
-            return {}
-        if num_samples is not None:
-            return {"enumerate": site["infer"].get("enumerate", default),
-                    "num_samples": site["infer"].get("num_samples", num_samples)}
-        if getattr(site["fn"], "has_enumerate_support", False):
-            return {"enumerate": site["infer"].get("enumerate", default),
-                    "expand": site["infer"].get("expand", expand)}
+def _config_fn(default, expand, num_samples, tmc, site):
+    if site["type"] != "sample" or site["is_observed"]:
         return {}
+    if type(site["fn"]).__name__ == "_Subsample":
+        return {}
+    if num_samples is not None:
+        return {"enumerate": site["infer"].get("enumerate", default),
+                "num_samples": site["infer"].get("num_samples", num_samples),
+                "expand": site["infer"].get("expand", expand),
+                "tmc": site["infer"].get("tmc", tmc)}
+    if getattr(site["fn"], "has_enumerate_support", False):
+        return {"enumerate": site["infer"].get("enumerate", default),
+                "expand": site["infer"].get("expand", expand)}
+    return {}
 
-    return config_fn
+
+def _config_enumerate(default, expand, num_samples, tmc):
+    return partial(_config_fn, default, expand, num_samples, tmc)
 
 
-def config_enumerate(guide=None, default="parallel", expand=False, num_samples=None):
+def config_enumerate(guide=None, default="parallel", expand=False, num_samples=None, tmc="diagonal"):
     """
     Configures enumeration for all relevant sites in a guide. This is mainly
     used in conjunction with :class:`~pyro.infer.traceenum_elbo.TraceEnum_ELBO`.
@@ -141,6 +147,8 @@ def config_enumerate(guide=None, default="parallel", expand=False, num_samples=N
         than exhaustive enumeration. This makes sense for both continuous and
         discrete distributions.
     :type num_samples: int or None
+    :param tmc: "mixture" or "diagonal" strategies to use in Tensor Monte Carlo
+    :type tmc: string or None
     :return: an annotated guide
     :rtype: callable
     """
@@ -156,9 +164,12 @@ def config_enumerate(guide=None, default="parallel", expand=False, num_samples=N
         if default == "sequential":
             raise ValueError('Local sampling does not support "sequential" sampling; '
                              'use "parallel" sampling instead.')
+    if tmc is not None:
+        if tmc not in ("mixture", "diagonal"):
+            raise ValueError("{} not a valid TMC strategy".format(tmc))
 
     # Support usage as a decorator:
     if guide is None:
-        return lambda guide: config_enumerate(guide, default=default, expand=expand, num_samples=num_samples)
+        return lambda guide: config_enumerate(guide, default=default, expand=expand, num_samples=num_samples, tmc=tmc)
 
-    return poutine.infer_config(guide, config_fn=_config_enumerate(default, expand, num_samples))
+    return poutine.infer_config(guide, config_fn=_config_enumerate(default, expand, num_samples, tmc))

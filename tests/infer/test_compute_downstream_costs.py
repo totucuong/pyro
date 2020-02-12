@@ -1,8 +1,8 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import math
 
-import networkx
 import pytest
 import torch
 
@@ -28,7 +28,7 @@ def _brute_force_compute_downstream_costs(model_trace, guide_trace,  #
                                                    guide_trace.nodes[node]['log_prob']))
         downstream_guide_cost_nodes[node] = set([node])
 
-        descendants = networkx.descendants(guide_trace, node)
+        descendants = guide_trace.successors(node)
 
         for desc in descendants:
             desc_mft = MultiFrameTensor((stacks[desc],

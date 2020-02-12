@@ -1,3 +1,6 @@
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 An implementation of a Deep Markov Model in Pyro based on reference [1].
 This is essentially the DKS variant outlined in the paper. The primary difference
@@ -24,9 +27,9 @@ import polyphonic_data_loader as poly
 import pyro
 import pyro.distributions as dist
 import pyro.poutine as poutine
-from pyro.distributions import InverseAutoregressiveFlow, TransformedDistribution
-from pyro.infer import SVI, JitTrace_ELBO, Trace_ELBO
-from pyro.nn import AutoRegressiveNN
+from pyro.distributions import TransformedDistribution
+from pyro.distributions.transforms import affine_autoregressive
+from pyro.infer import SVI, JitTrace_ELBO, Trace_ELBO, TraceEnum_ELBO, TraceTMC_ELBO, config_enumerate
 from pyro.optim import ClippedAdam
 from util import get_logger
 
@@ -35,6 +38,7 @@ class Emitter(nn.Module):
     """
     Parameterizes the bernoulli observation likelihood `p(x_t | z_t)`
     """
+
     def __init__(self, input_dim, z_dim, emission_dim):
         super(Emitter, self).__init__()
         # initialize the three linear transformations used in the neural network
@@ -60,6 +64,7 @@ class GatedTransition(nn.Module):
     Parameterizes the gaussian latent transition probability `p(z_t | z_{t-1})`
     See section 5 in the reference for comparison.
     """
+
     def __init__(self, z_dim, transition_dim):
         super(GatedTransition, self).__init__()
         # initialize the six linear transformations used in the neural network
@@ -105,6 +110,7 @@ class Combiner(nn.Module):
     of the guide (i.e. the variational distribution). The dependence on `x_{t:T}` is
     through the hidden state of the RNN (see the PyTorch module `rnn` below)
     """
+
     def __init__(self, z_dim, rnn_dim):
         super(Combiner, self).__init__()
         # initialize the three linear transformations used in the neural network
@@ -136,20 +142,23 @@ class DMM(nn.Module):
     This PyTorch Module encapsulates the model as well as the
     variational distribution (the guide) for the Deep Markov Model
     """
+
     def __init__(self, input_dim=88, z_dim=100, emission_dim=100,
-                 transition_dim=200, rnn_dim=600, rnn_dropout_rate=0.0,
+                 transition_dim=200, rnn_dim=600, num_layers=1, rnn_dropout_rate=0.0,
                  num_iafs=0, iaf_dim=50, use_cuda=False):
         super(DMM, self).__init__()
         # instantiate PyTorch modules used in the model and guide below
         self.emitter = Emitter(input_dim, z_dim, emission_dim)
         self.trans = GatedTransition(z_dim, transition_dim)
         self.combiner = Combiner(z_dim, rnn_dim)
+        # dropout just takes effect on inner layers of rnn
+        rnn_dropout_rate = 0. if num_layers == 1 else rnn_dropout_rate
         self.rnn = nn.RNN(input_size=input_dim, hidden_size=rnn_dim, nonlinearity='relu',
-                          batch_first=True, bidirectional=False, num_layers=1,
+                          batch_first=True, bidirectional=False, num_layers=num_layers,
                           dropout=rnn_dropout_rate)
 
         # if we're using normalizing flows, instantiate those too
-        self.iafs = [InverseAutoregressiveFlow(AutoRegressiveNN(z_dim, [iaf_dim])) for _ in range(num_iafs)]
+        self.iafs = [affine_autoregressive(z_dim, hidden_dims=[iaf_dim]) for _ in range(num_iafs)]
         self.iafs_modules = nn.ModuleList(self.iafs)
 
         # define a (trainable) parameters z_0 and z_q_0 that help define the probability
@@ -183,7 +192,8 @@ class DMM(nn.Module):
         # this marks that each datapoint is conditionally independent of the others
         with pyro.plate("z_minibatch", len(mini_batch)):
             # sample the latents z and observed x's one time step at a time
-            for t in range(1, T_max + 1):
+            # we wrap this loop in pyro.markov so that TraceEnum_ELBO can use multiple samples from the guide at each z
+            for t in pyro.markov(range(1, T_max + 1)):
                 # the next chunk of code samples z_t ~ p(z_t | z_{t-1})
                 # note that (both here and elsewhere) we use poutine.scale to take care
                 # of KL annealing. we use the mask() method to deal with raggedness
@@ -239,7 +249,8 @@ class DMM(nn.Module):
         # this marks that each datapoint is conditionally independent of the others.
         with pyro.plate("z_minibatch", len(mini_batch)):
             # sample the latents z one time step at a time
-            for t in range(1, T_max + 1):
+            # we wrap this loop in pyro.markov so that TraceEnum_ELBO can use multiple samples from the guide at each z
+            for t in pyro.markov(range(1, T_max + 1)):
                 # the next two lines assemble the distribution q(z_t | z_{t-1}, x_{t:T})
                 z_loc, z_scale = self.combiner(z_prev, rnn_output[:, t - 1, :])
 
@@ -248,16 +259,24 @@ class DMM(nn.Module):
                 # to yield a transformed distribution that we use for q(z_t|...)
                 if len(self.iafs) > 0:
                     z_dist = TransformedDistribution(dist.Normal(z_loc, z_scale), self.iafs)
+                    assert z_dist.event_shape == (self.z_q_0.size(0),)
+                    assert z_dist.batch_shape[-1:] == (len(mini_batch),)
                 else:
                     z_dist = dist.Normal(z_loc, z_scale)
-                assert z_dist.event_shape == ()
-                assert z_dist.batch_shape == (len(mini_batch), self.z_q_0.size(0))
+                    assert z_dist.event_shape == ()
+                    assert z_dist.batch_shape[-2:] == (len(mini_batch), self.z_q_0.size(0))
 
                 # sample z_t from the distribution z_dist
                 with pyro.poutine.scale(scale=annealing_factor):
-                    z_t = pyro.sample("z_%d" % t,
-                                      z_dist.mask(mini_batch_mask[:, t - 1:t])
-                                            .to_event(1))
+                    if len(self.iafs) > 0:
+                        # in output of normalizing flow, all dimensions are correlated (event shape is not empty)
+                        z_t = pyro.sample("z_%d" % t,
+                                          z_dist.mask(mini_batch_mask[:, t - 1]))
+                    else:
+                        # when no normalizing flow used, ".to_event(1)" indicates latent dimensions are independent
+                        z_t = pyro.sample("z_%d" % t,
+                                          z_dist.mask(mini_batch_mask[:, t - 1:t])
+                                          .to_event(1))
                 # the latent sampled at this time step will be conditioned upon in the next time step
                 # so keep track of it
                 z_prev = z_t
@@ -269,7 +288,7 @@ def main(args):
     log = get_logger(args.log)
     log(args)
 
-    data = poly.load_data()
+    data = poly.load_data(poly.JSB_CHORALES)
     training_seq_lengths = data['train']['sequence_lengths']
     training_data_sequences = data['train']['sequences']
     test_seq_lengths = data['test']['sequence_lengths']
@@ -277,12 +296,12 @@ def main(args):
     val_seq_lengths = data['valid']['sequence_lengths']
     val_data_sequences = data['valid']['sequences']
     N_train_data = len(training_seq_lengths)
-    N_train_time_slices = float(np.sum(training_seq_lengths))
+    N_train_time_slices = float(torch.sum(training_seq_lengths))
     N_mini_batches = int(N_train_data / args.mini_batch_size +
                          int(N_train_data % args.mini_batch_size > 0))
 
     log("N_train_data: %d     avg. training seq. length: %.2f    N_mini_batches: %d" %
-        (N_train_data, np.mean(training_seq_lengths), N_mini_batches))
+        (N_train_data, training_seq_lengths.float().mean(), N_mini_batches))
 
     # how often we do validation/test evaluation during training
     val_test_frequency = 50
@@ -292,17 +311,19 @@ def main(args):
     # package repeated copies of val/test data for faster evaluation
     # (i.e. set us up for vectorization)
     def rep(x):
-        y = np.repeat(x, n_eval_samples, axis=0)
-        return y
+        rep_shape = torch.Size([x.size(0) * n_eval_samples]) + x.size()[1:]
+        repeat_dims = [1] * len(x.size())
+        repeat_dims[0] = n_eval_samples
+        return x.repeat(repeat_dims).reshape(n_eval_samples, -1).transpose(1, 0).reshape(rep_shape)
 
     # get the validation/test data ready for the dmm: pack into sequences, etc.
     val_seq_lengths = rep(val_seq_lengths)
     test_seq_lengths = rep(test_seq_lengths)
     val_batch, val_batch_reversed, val_batch_mask, val_seq_lengths = poly.get_mini_batch(
-        np.arange(n_eval_samples * val_data_sequences.shape[0]), rep(val_data_sequences),
+        torch.arange(n_eval_samples * val_data_sequences.shape[0]), rep(val_data_sequences),
         val_seq_lengths, cuda=args.cuda)
     test_batch, test_batch_reversed, test_batch_mask, test_seq_lengths = poly.get_mini_batch(
-        np.arange(n_eval_samples * test_data_sequences.shape[0]), rep(test_data_sequences),
+        torch.arange(n_eval_samples * test_data_sequences.shape[0]), rep(test_data_sequences),
         test_seq_lengths, cuda=args.cuda)
 
     # instantiate the dmm
@@ -316,8 +337,21 @@ def main(args):
     adam = ClippedAdam(adam_params)
 
     # setup inference algorithm
-    elbo = JitTrace_ELBO() if args.jit else Trace_ELBO()
-    svi = SVI(dmm.model, dmm.guide, adam, loss=elbo)
+    if args.tmc:
+        if args.jit:
+            raise NotImplementedError("no JIT support yet for TMC")
+        tmc_loss = TraceTMC_ELBO()
+        dmm_guide = config_enumerate(dmm.guide, default="parallel", num_samples=args.tmc_num_samples, expand=False)
+        svi = SVI(dmm.model, dmm_guide, adam, loss=tmc_loss)
+    elif args.tmcelbo:
+        if args.jit:
+            raise NotImplementedError("no JIT support yet for TMC ELBO")
+        elbo = TraceEnum_ELBO()
+        dmm_guide = config_enumerate(dmm.guide, default="parallel", num_samples=args.tmc_num_samples, expand=False)
+        svi = SVI(dmm.model, dmm_guide, adam, loss=elbo)
+    else:
+        elbo = JitTrace_ELBO() if args.jit else Trace_ELBO()
+        svi = SVI(dmm.model, dmm.guide, adam, loss=elbo)
 
     # now we're going to define some functions we need to form the main training loop
 
@@ -372,9 +406,9 @@ def main(args):
 
         # compute the validation and test loss n_samples many times
         val_nll = svi.evaluate_loss(val_batch, val_batch_reversed, val_batch_mask,
-                                    val_seq_lengths) / np.sum(val_seq_lengths)
+                                    val_seq_lengths) / torch.sum(val_seq_lengths)
         test_nll = svi.evaluate_loss(test_batch, test_batch_reversed, test_batch_mask,
-                                     test_seq_lengths) / np.sum(test_seq_lengths)
+                                     test_seq_lengths) / torch.sum(test_seq_lengths)
 
         # put the RNN back into training mode (i.e. turn on drop-out if applicable)
         dmm.rnn.train()
@@ -396,8 +430,7 @@ def main(args):
         # accumulator for our estimate of the negative log likelihood (or rather -elbo) for this epoch
         epoch_nll = 0.0
         # prepare mini-batch subsampling indices for this epoch
-        shuffled_indices = np.arange(N_train_data)
-        np.random.shuffle(shuffled_indices)
+        shuffled_indices = torch.randperm(N_train_data)
 
         # process each mini-batch; this is where we take gradient steps
         for which_mini_batch in range(N_mini_batches):
@@ -417,19 +450,19 @@ def main(args):
 
 # parse command-line arguments and execute the main method
 if __name__ == '__main__':
-    assert pyro.__version__.startswith('0.3.0')
+    assert pyro.__version__.startswith('1.2.0')
 
     parser = argparse.ArgumentParser(description="parse args")
     parser.add_argument('-n', '--num-epochs', type=int, default=5000)
     parser.add_argument('-lr', '--learning-rate', type=float, default=0.0003)
     parser.add_argument('-b1', '--beta1', type=float, default=0.96)
     parser.add_argument('-b2', '--beta2', type=float, default=0.999)
-    parser.add_argument('-cn', '--clip-norm', type=float, default=20.0)
+    parser.add_argument('-cn', '--clip-norm', type=float, default=10.0)
     parser.add_argument('-lrd', '--lr-decay', type=float, default=0.99996)
     parser.add_argument('-wd', '--weight-decay', type=float, default=2.0)
     parser.add_argument('-mbs', '--mini-batch-size', type=int, default=20)
     parser.add_argument('-ae', '--annealing-epochs', type=int, default=1000)
-    parser.add_argument('-maf', '--minimum-annealing-factor', type=float, default=0.1)
+    parser.add_argument('-maf', '--minimum-annealing-factor', type=float, default=0.2)
     parser.add_argument('-rdr', '--rnn-dropout-rate', type=float, default=0.1)
     parser.add_argument('-iafs', '--num-iafs', type=int, default=0)
     parser.add_argument('-id', '--iaf-dim', type=int, default=100)
@@ -440,6 +473,9 @@ if __name__ == '__main__':
     parser.add_argument('-smod', '--save-model', type=str, default='')
     parser.add_argument('--cuda', action='store_true')
     parser.add_argument('--jit', action='store_true')
+    parser.add_argument('--tmc', action='store_true')
+    parser.add_argument('--tmcelbo', action='store_true')
+    parser.add_argument('--tmc-num-samples', default=10, type=int)
     parser.add_argument('-l', '--log', type=str, default='dmm.log')
     args = parser.parse_args()
 

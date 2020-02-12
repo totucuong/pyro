@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import re
 import warnings
@@ -89,8 +90,7 @@ class ParamStoreDict(object):
         """
         Remove a parameter from the param store.
         """
-        constrained_value = self._params.pop(name)
-        unconstrained_value = constrained_value.unconstrained()
+        unconstrained_value = self._params.pop(name)
         self._param_to_name.pop(unconstrained_value)
         self._constraints.pop(name)
 
@@ -183,7 +183,7 @@ class ParamStoreDict(object):
         assert self._params[param_name] is old_param.unconstrained()
         self[param_name] = new_param
 
-    def get_param(self, name, init_tensor=None, constraint=constraints.real):
+    def get_param(self, name, init_tensor=None, constraint=constraints.real, event_dim=None):
         """
         Get parameter from its name. If it does not yet exist in the
         ParamStore, it will be created and stored.
@@ -195,6 +195,7 @@ class ParamStoreDict(object):
         :type init_tensor: torch.Tensor
         :param constraint: torch constraint
         :type constraint: torch.distributions.constraints.Constraint
+        :param int event_dim: (ignored)
         :returns: parameter
         :rtype: torch.Tensor
         """

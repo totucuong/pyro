@@ -1,4 +1,5 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 from unittest import TestCase
 
@@ -95,3 +96,11 @@ def test_batch_log_dims(dim, probs):
     support = dist.Categorical(probs).enumerate_support()
     log_prob = dist.Categorical(probs).log_prob(support)
     assert_equal(log_prob.size(), log_prob_shape)
+
+
+def test_view_reshape_bug():
+    batch_shape = (1, 2, 1, 3, 1)
+    sample_shape = (4,)
+    cardinality = 2
+    logits = torch.randn(batch_shape + (cardinality,))
+    dist.Categorical(logits=logits).sample(sample_shape)

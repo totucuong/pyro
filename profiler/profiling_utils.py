@@ -1,12 +1,13 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import cProfile
+from io import StringIO
 import functools
 import os
 import pstats
 import timeit
 from contextlib import contextmanager
-from cStringIO import StringIO
 
 from prettytable import ALL, PrettyTable
 

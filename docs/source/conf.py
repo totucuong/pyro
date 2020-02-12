@@ -1,3 +1,6 @@
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import sys
 
@@ -45,6 +48,7 @@ extensions = [
     'sphinx.ext.ifconfig',  #
     'sphinx.ext.viewcode',  #
     'sphinx.ext.githubpages',  #
+    'sphinx.ext.graphviz',  #
     'sphinx.ext.autodoc',
     'sphinx.ext.doctest',
 ]
@@ -187,9 +191,9 @@ texinfo_documents = [
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3/', None),
-    'torch': ('http://pytorch.org/docs/master/', None),
-    'networkx': ('https://networkx.github.io/documentation/stable/', None),
-    'opt_einsum': ('https://optimized-einsum.readthedocs.io/en/stable/', None)
+    'torch': ('https://pytorch.org/docs/master/', None),
+    'opt_einsum': ('https://optimized-einsum.readthedocs.io/en/stable/', None),
+    'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
 }
 
 # document class constructors (__init__ methods):
@@ -207,9 +211,7 @@ def setup(app):
 
 
 # @jpchen's hack to get rtd builder to install latest pytorch
+# See similar line in the install section of .travis.yml
 if 'READTHEDOCS' in os.environ:
-    os.system('pip install http://download.pytorch.org/whl/cpu/torch-0.4.1-cp27-cp27mu-linux_x86_64.whl')
-    # for pytorch 1.0 (currently fails with OOM
-    # https://readthedocs.org/projects/pyro-ppl/builds/8159615/
-#     os.system('pip install torch_nightly==1.0.0.dev20181127 -f '
-#               'https://download.pytorch.org/whl/nightly/cpu/torch_nightly.html')
+    os.system('pip install torch==1.4.0+cpu torchvision==0.5.0+cpu '
+              '-f https://download.pytorch.org/whl/torch_stable.html')

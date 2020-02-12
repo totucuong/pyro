@@ -1,34 +1,27 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 
 import pyro
 import pyro.distributions as dist
 import pyro.optim as optim
 import pyro.poutine as poutine
-from pyro.contrib.autoguide import AutoLaplaceApproximation
-from pyro.infer import SVI, TracePredictive, Trace_ELBO
+from pyro.infer.autoguide import AutoLaplaceApproximation
+from pyro.infer import SVI, Trace_ELBO
 from pyro.infer.mcmc import MCMC, NUTS
 from tests.common import assert_equal
 
 
+pytestmark = pytest.mark.filterwarnings("ignore::PendingDeprecationWarning")
+
+
 def model(num_trials):
-    phi_prior = dist.Uniform(num_trials.new_tensor(0.), num_trials.new_tensor(1.))\
-        .expand_by([num_trials.shape[0]])
-    success_prob = pyro.sample("phi", phi_prior)
-    return pyro.sample("obs", dist.Binomial(num_trials, success_prob))
-
-
-def test_posterior_predictive():
-    true_probs = torch.ones(5) * 0.7
-    num_trials = torch.ones(5) * 1000
-    num_success = dist.Binomial(num_trials, true_probs).sample()
-    conditioned_model = poutine.condition(model, data={"obs": num_success})
-    nuts_kernel = NUTS(conditioned_model, adapt_step_size=True)
-    mcmc_run = MCMC(nuts_kernel, num_samples=1000, warmup_steps=200).run(num_trials)
-    posterior_predictive = TracePredictive(model, mcmc_run, num_samples=10000).run(num_trials)
-    marginal_return_vals = posterior_predictive.marginal().empirical["_RETURN"]
-    assert_equal(marginal_return_vals.mean, torch.ones(5) * 700, prec=30)
+    with pyro.plate("data", num_trials.size(0)):
+        phi_prior = dist.Uniform(num_trials.new_tensor(0.), num_trials.new_tensor(1.))
+        success_prob = pyro.sample("phi", phi_prior)
+        return pyro.sample("obs", dist.Binomial(num_trials, success_prob))
 
 
 def test_nesting():
@@ -48,6 +41,8 @@ def test_nesting():
     assert len(tp.trace.nodes) == 0
 
 
+# TODO: Make this available directly in `SVI` if needed.
+@pytest.mark.filterwarnings('ignore::FutureWarning')
 def test_information_criterion():
     # milk dataset: https://github.com/rmcelreath/rethinking/blob/master/data/milk.csv
     kcal = torch.tensor([0.49, 0.47, 0.56, 0.89, 0.92, 0.8, 0.46, 0.71, 0.68,
@@ -63,7 +58,8 @@ def test_information_criterion():
 
     delta_guide = AutoLaplaceApproximation(model)
 
-    svi = SVI(model, delta_guide, optim.Adam({"lr": 0.05}), loss=Trace_ELBO(), num_samples=3000)
+    svi = SVI(model, delta_guide, optim.Adam({"lr": 0.05}), loss=Trace_ELBO(),
+              num_steps=0, num_samples=3000)
     for i in range(100):
         svi.step()
 

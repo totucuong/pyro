@@ -1,8 +1,10 @@
-from __future__ import absolute_import, division, print_function
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
 
 import pytest
 import torch
 import torch.nn as nn
+from torch.nn import Parameter
 
 import pyro
 import pyro.distributions as dist
@@ -60,6 +62,23 @@ def test_module_nn(nn_module):
         assert pyro.params.user_param_name(name) in nn_module.state_dict().keys()
 
 
+@pytest.mark.parametrize("nn_module", [outest, outer])
+def test_param_no_grad(nn_module):
+    class net(torch.nn.Module):
+        def __init__(self):
+            super(net, self).__init__()
+            self.x = Parameter(torch.zeros(1))
+            self.y = Parameter(torch.zeros(1), requires_grad=False)
+
+        def forward(self, s):
+            pass
+
+    with pytest.warns(UserWarning):
+        pyro.module('net', net())
+    assert 'net$$$x' in pyro.get_param_store().keys()
+    assert 'net$$$y' not in pyro.get_param_store().keys()
+
+
 @pytest.mark.parametrize("nn_module", [sequential])
 def test_module_sequential(nn_module):
     pyro.clear_param_store()
@@ -70,6 +89,7 @@ def test_module_sequential(nn_module):
 
 
 @pytest.mark.parametrize("nn_module", [outest, outer])
+@pytest.mark.filterwarnings("ignore::FutureWarning")
 def test_random_module(nn_module):
     pyro.clear_param_store()
     nn_module = nn_module()

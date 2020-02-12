@@ -1,3 +1,6 @@
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 """
 The ``pyro.contrib.named`` module is a thin syntactic layer on top of Pyro.  It
 allows Pyro models to be written to look like programs with operating on Python
@@ -39,15 +42,13 @@ alias Pyro statements. For example::
     >>> obs = state.x.sample_(dist.Normal(loc, scale), obs=z)
 
 For deeper examples of how these can be used in model code, see the
-`Tree Data <https://github.com/uber/pyro/blob/dev/examples/contrib/named/tree_data.py>`_
+`Tree Data <https://github.com/pyro-ppl/pyro/blob/dev/examples/contrib/named/tree_data.py>`_
 and
-`Mixture <https://github.com/uber/pyro/blob/dev/examples/contrib/named/mixture.py>`_
+`Mixture <https://github.com/pyro-ppl/pyro/blob/dev/examples/contrib/named/mixture.py>`_
 examples.
 
 Authors: Fritz Obermeyer, Alexander Rush
 """
-from __future__ import absolute_import, division, print_function
-
 import functools
 
 import pyro

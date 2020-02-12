@@ -1,3 +1,6 @@
+# Copyright (c) 2017-2019 Uber Technologies, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import functools
 
 from pyro.params.param_store import _MODULE_NAMESPACE_DIVIDER, ParamStoreDict  # noqa: F401
@@ -125,9 +128,8 @@ class NonlocalExit(Exception):
     """
     def __init__(self, site, *args, **kwargs):
         """
-        :param site: message at a pyro site
-
-        constructor.  Just stores the input site.
+        :param site: message at a pyro site constructor.
+            Just stores the input site.
         """
         super(NonlocalExit, self).__init__(*args, **kwargs)
         self.site = site
@@ -146,6 +148,7 @@ class NonlocalExit(Exception):
 def default_process_message(msg):
     """
     Default method for processing messages in inference.
+
     :param msg: a message to be processed
     :returns: None
     """
@@ -194,7 +197,7 @@ def apply_stack(initial_msg):
 
     default_process_message(msg)
 
-    for frame in stack[-pointer:]:  # reversed(stack[0:pointer])
+    for frame in stack[-pointer:]:
         frame._postprocess_message(msg)
 
     cont = msg["continuation"]
@@ -217,7 +220,7 @@ def effectful(fn=None, type=None):
     :param fn: function or callable that performs an effectful computation
     :param str type: the type label of the operation, e.g. `"sample"`
 
-    Wrapper for calling :func:~`pyro.poutine.runtime.apply_stack` to apply any active effects.
+    Wrapper for calling :func:`~pyro.poutine.runtime.apply_stack` to apply any active effects.
     """
     if fn is None:
         return functools.partial(effectful, type=type)
